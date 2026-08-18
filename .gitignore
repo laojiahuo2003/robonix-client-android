@@ -1,0 +1,36 @@
+# Gradle
+.gradle/
+build/
+
+# Android / IntelliJ IDEA
+.idea/
+*.iml
+captures/
+.externalNativeBuild/
+.cxx/
+local.properties
+
+# Kotlin
+.kotlin/
+
+# Android Studio / nav artifacts
+.navigation/
+captures/
+output.json
+
+# NDK
+*.so
+
+# Build outputs
+*.apk
+*.aab
+*.ap_
+*.aab
+*.dex
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
