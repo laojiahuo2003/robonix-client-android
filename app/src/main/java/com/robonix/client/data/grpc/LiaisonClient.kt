@@ -9,9 +9,18 @@ import com.robonix.client.data.model.RtdlNodeState
 import com.robonix.client.data.model.RtdlPlan
 import com.robonix.client.data.model.SessionStatus
 import com.robonix.client.data.model.TaskState
+import com.robonix.client.data.model.HandsfreeStatus
 import com.robonix.client.data.model.VoiceEvent
+import com.robonix.proto.liaison.FinishVoiceCapture_Request
+import com.robonix.proto.liaison.FinishVoiceCapture_Response
+import com.robonix.proto.liaison.GetHandsfreeStatus_Request
+import com.robonix.proto.liaison.GetHandsfreeStatus_Response
+import com.robonix.proto.liaison.SetHandsfree_Request
+import com.robonix.proto.liaison.SetHandsfree_Response
 import com.robonix.proto.liaison.StartVoiceSession_Request
 import com.robonix.proto.liaison.StartVoiceSession_Response
+import com.robonix.proto.liaison.WatchHandsfreeEvents_Request
+import com.robonix.proto.liaison.WatchHandsfreeEvents_Response
 import com.robonix.client.AppLog
 import com.robonix.proto.liaison.VoiceEvent as ProtoVoiceEvent
 import com.robonix.proto.pilot.PilotEvent as ProtoPilotEvent
@@ -52,6 +61,46 @@ class LiaisonClient @Inject constructor(
                 StartVoiceSession_Request.getDefaultInstance()))
             .setResponseMarshaller(ProtoUtils.marshaller(
                 StartVoiceSession_Response.getDefaultInstance()))
+            .build()
+
+    private val FINISH_VOICE_METHOD: MethodDescriptor<FinishVoiceCapture_Request, FinishVoiceCapture_Response> =
+        MethodDescriptor.newBuilder<FinishVoiceCapture_Request, FinishVoiceCapture_Response>()
+            .setType(MethodDescriptor.MethodType.UNARY)
+            .setFullMethodName("robonix.contracts.RobonixSystemLiaisonVoiceFinish/FinishVoiceCapture")
+            .setRequestMarshaller(ProtoUtils.marshaller(
+                FinishVoiceCapture_Request.getDefaultInstance()))
+            .setResponseMarshaller(ProtoUtils.marshaller(
+                FinishVoiceCapture_Response.getDefaultInstance()))
+            .build()
+
+    private val HANDSFREE_STATUS_METHOD: MethodDescriptor<GetHandsfreeStatus_Request, GetHandsfreeStatus_Response> =
+        MethodDescriptor.newBuilder<GetHandsfreeStatus_Request, GetHandsfreeStatus_Response>()
+            .setType(MethodDescriptor.MethodType.UNARY)
+            .setFullMethodName("robonix.contracts.RobonixSystemLiaisonHandsfreeStatus/GetHandsfreeStatus")
+            .setRequestMarshaller(ProtoUtils.marshaller(
+                GetHandsfreeStatus_Request.getDefaultInstance()))
+            .setResponseMarshaller(ProtoUtils.marshaller(
+                GetHandsfreeStatus_Response.getDefaultInstance()))
+            .build()
+
+    private val HANDSFREE_SET_METHOD: MethodDescriptor<SetHandsfree_Request, SetHandsfree_Response> =
+        MethodDescriptor.newBuilder<SetHandsfree_Request, SetHandsfree_Response>()
+            .setType(MethodDescriptor.MethodType.UNARY)
+            .setFullMethodName("robonix.contracts.RobonixSystemLiaisonHandsfreeSetEnabled/SetHandsfree")
+            .setRequestMarshaller(ProtoUtils.marshaller(
+                SetHandsfree_Request.getDefaultInstance()))
+            .setResponseMarshaller(ProtoUtils.marshaller(
+                SetHandsfree_Response.getDefaultInstance()))
+            .build()
+
+    private val HANDSFREE_EVENTS_METHOD: MethodDescriptor<WatchHandsfreeEvents_Request, WatchHandsfreeEvents_Response> =
+        MethodDescriptor.newBuilder<WatchHandsfreeEvents_Request, WatchHandsfreeEvents_Response>()
+            .setType(MethodDescriptor.MethodType.SERVER_STREAMING)
+            .setFullMethodName("robonix.contracts.RobonixSystemLiaisonHandsfreeEvents/WatchHandsfreeEvents")
+            .setRequestMarshaller(ProtoUtils.marshaller(
+                WatchHandsfreeEvents_Request.getDefaultInstance()))
+            .setResponseMarshaller(ProtoUtils.marshaller(
+                WatchHandsfreeEvents_Response.getDefaultInstance()))
             .build()
 
     fun submitTask(
@@ -96,8 +145,9 @@ class LiaisonClient @Inject constructor(
             .setTimestampMs(System.currentTimeMillis())
             .build()
 
+        val call = channel.newCall(SUBMIT_TASK_METHOD, io.grpc.CallOptions.DEFAULT)
         ClientCalls.asyncServerStreamingCall(
-            channel.newCall(SUBMIT_TASK_METHOD, io.grpc.CallOptions.DEFAULT),
+            call,
             task,
             object : StreamObserver<ProtoPilotEvent> {
                 override fun onNext(event: ProtoPilotEvent) {
@@ -117,7 +167,7 @@ class LiaisonClient @Inject constructor(
             },
         )
 
-        awaitClose { }
+        awaitClose { call.cancel("flow collector cancelled", null) }
     }
 
     fun startVoiceSession(
@@ -160,8 +210,9 @@ class LiaisonClient @Inject constructor(
             .setContextJson(context.toString())
             .build()
 
+        val call = channel.newCall(START_VOICE_METHOD, io.grpc.CallOptions.DEFAULT)
         ClientCalls.asyncServerStreamingCall(
-            channel.newCall(START_VOICE_METHOD, io.grpc.CallOptions.DEFAULT),
+            call,
             request,
             object : StreamObserver<StartVoiceSession_Response> {
                 override fun onNext(wrapped: StartVoiceSession_Response) {
@@ -194,7 +245,101 @@ class LiaisonClient @Inject constructor(
             },
         )
 
-        awaitClose { }
+        awaitClose { call.cancel("flow collector cancelled", null) }
+    }
+
+    /**
+     * Early-finish a running voice session: the server stops recording and
+     * submits the recognized-so-far text. The voice stream itself keeps
+     * running afterwards (it flushes asr_final / session_done events).
+     * Matches the web client's finish_voice_capture call.
+     */
+    suspend fun finishVoiceCapture(
+        target: String,
+        sessionId: String,
+    ): Result<String> = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        try {
+            val channel = channelProvider.getChannel(target)
+            val response = ClientCalls.blockingUnaryCall(
+                channel.newCall(FINISH_VOICE_METHOD, io.grpc.CallOptions.DEFAULT),
+                FinishVoiceCapture_Request.newBuilder().setSessionId(sessionId).build(),
+            )
+            if (response.ok) Result.success(response.detail.ifBlank { response.sessionId })
+            else Result.failure(RuntimeException(response.detail.ifBlank { "finish rejected" }))
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    // --- Handsfree (Phase 4) ---
+
+    suspend fun getHandsfreeStatus(target: String): HandsfreeStatus =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            val channel = channelProvider.getChannel(target)
+            val resp = ClientCalls.blockingUnaryCall(
+                channel.newCall(HANDSFREE_STATUS_METHOD, io.grpc.CallOptions.DEFAULT),
+                GetHandsfreeStatus_Request.getDefaultInstance(),
+            )
+            HandsfreeStatus(
+                enabled = resp.enabled,
+                state = resp.state,
+                keyword = resp.keyword,
+                micProviderId = resp.micProviderId,
+                speakerProviderId = resp.speakerProviderId,
+                lastWakeMs = resp.lastWakeMs,
+                lastTranscript = resp.lastTranscript,
+                lastError = resp.lastError,
+            )
+        }
+
+    suspend fun setHandsfreeEnabled(
+        target: String,
+        enabled: Boolean,
+        micProviderId: String = "",
+        speakerProviderId: String = "",
+    ): Result<HandsfreeStatus> = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        try {
+            val channel = channelProvider.getChannel(target)
+            val resp = ClientCalls.blockingUnaryCall(
+                channel.newCall(HANDSFREE_SET_METHOD, io.grpc.CallOptions.DEFAULT),
+                SetHandsfree_Request.newBuilder()
+                    .setEnabled(enabled)
+                    .setMicProviderId(micProviderId)
+                    .setSpeakerProviderId(speakerProviderId)
+                    .build(),
+            )
+            if (resp.ok) Result.success(HandsfreeStatus(
+                enabled = resp.enabled,
+                state = resp.state,
+                // caller's provider ids — the response only carries ok/enabled/state/detail
+                micProviderId = micProviderId,
+                speakerProviderId = speakerProviderId,
+            ))
+            else Result.failure(RuntimeException(resp.detail.ifBlank { "set handsfree failed" }))
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /** Server stream of handsfree voice events; closed automatically on collect-cancel. */
+    fun watchHandsfreeEvents(target: String): Flow<VoiceEvent> = callbackFlow {
+        val channel = channelProvider.getChannel(target)
+        val call = channel.newCall(HANDSFREE_EVENTS_METHOD, io.grpc.CallOptions.DEFAULT)
+        ClientCalls.asyncServerStreamingCall(
+            call,
+            WatchHandsfreeEvents_Request.getDefaultInstance(),
+            object : StreamObserver<WatchHandsfreeEvents_Response> {
+                override fun onNext(value: WatchHandsfreeEvents_Response) {
+                    if (value.hasEvent()) trySend(mapVoiceEvent(value.event))
+                }
+                override fun onError(t: Throwable) {
+                    AppLog.write("HANDSFREE", "events stream error: ${t.message}", t)
+                    close(t)
+                }
+                override fun onCompleted() { close() }
+            },
+        )
+        awaitClose { call.cancel("flow collector cancelled", null) }
     }
 
     // --- Proto mapping helpers ---

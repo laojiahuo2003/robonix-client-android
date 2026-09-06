@@ -69,7 +69,7 @@ protobuf {
 
 dependencies {
     // Compose BOM
-    val composeBom = platform("androidx.compose:compose-bom:2024.01.00")
+    val composeBom = platform("androidx.compose:compose-bom:2024.02.00")
     implementation(composeBom)
 
     // Compose UI
@@ -113,11 +113,16 @@ dependencies {
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
 
+    // YAML (Soma robot description)
+    implementation("org.yaml:snakeyaml:2.2")
+
     // Core
     implementation("androidx.core:core-ktx:1.12.0")
 
     // Testing
     testImplementation("junit:junit:4.13.2")
+    // org.json for mapper golden tests (android.jar's org.json is stubbed in JVM tests)
+    testImplementation("org.json:json:20231013")
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
     androidTestImplementation(composeBom)
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")

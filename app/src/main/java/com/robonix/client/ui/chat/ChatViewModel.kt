@@ -18,6 +18,7 @@ import com.robonix.client.domain.AudioRepository
 import com.robonix.client.domain.ChatRepository
 import com.robonix.client.domain.RtdlStateHolder
 import com.robonix.client.domain.createTimelineEvent
+import com.robonix.client.ui.i18n.AppStrings
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -49,6 +50,8 @@ data class ChatUiState(
     val sessionTitle: String = "",
     val settings: ClientSettings = ClientSettings(),
     val isRecording: Boolean = false,
+    /** Text of the most recent live event while a turn is busy; null when idle. */
+    val liveStatus: String? = null,
 )
 
 data class PlanRecord(
@@ -63,6 +66,7 @@ data class PlanRecord(
 class ChatViewModel @Inject constructor(
     private val chatRepository: ChatRepository,
     private val rtdlState: RtdlStateHolder,
+    private val handsfreeState: com.robonix.client.domain.HandsfreeStateHolder,
     private val audioRepository: AudioRepository,
     private val conversationStore: ConversationStore,
 ) : ViewModel() {
@@ -76,12 +80,81 @@ class ChatViewModel @Inject constructor(
     private var submitJob: Job? = null
     private var voiceJob: Job? = null
 
+    /** True while a FinishVoiceCapture call is in flight (mic released early). */
+    @Volatile private var finishInFlight = false
+
+    /**
+     * The server confirmed recording_started for the running voice session.
+     * `isRecording` alone is optimistic (set on press), so releasing before
+     * this flag means the hold was too brief → cancel the session instead of
+     * asking for an early submit.
+     */
+    @Volatile private var recordingConfirmed = false
+
+    /** Localize a string baked into state at emission time. */
+    private fun l(key: String, vararg args: Any?): String =
+        AppStrings.format(_uiState.value.settings.language, key, *args)
+
     init {
-        viewModelScope.launch { loadSessions() }
+        viewModelScope.launch {
+            loadSessions()
+            restoreLastSession()
+        }
+        // Hands-free wake-word sessions arrive through the shared holder and
+        // flow into the exact same pipeline as push-to-talk (web parity).
+        viewModelScope.launch {
+            handsfreeState.events.collect { event ->
+                com.robonix.client.AppLog.write("HANDSFREE", "voice event: kind=${event.kind}")
+                handleVoiceEvent(event, false)
+            }
+        }
+        // Mirror PTT activity so the handsfree toggle can be blocked while busy.
+        viewModelScope.launch {
+            uiState.collect { handsfreeState.voiceBusy.value = it.voiceActive }
+        }
     }
 
     private suspend fun loadSessions() {
         _sessions.value = conversationStore.loadAll()
+    }
+
+    /**
+     * Restore the most recent conversation whose messages survived, matching
+     * the web client's restoreLastSession (runs once at startup).
+     */
+    private suspend fun restoreLastSession() {
+        try {
+            val all = conversationStore.loadAll()
+            val target = all.firstOrNull { parseMessages(it.messagesJson).isNotEmpty() } ?: return
+            _uiState.update {
+                it.copy(
+                    sessionId = target.id,
+                    sessionTitle = target.title,
+                    messages = parseMessages(target.messagesJson),
+                    timeline = parseTimeline(target.timelineJson),
+                )
+            }
+            com.robonix.client.AppLog.write("CONV", "restored session ${target.id} (${target.title})")
+        } catch (e: Exception) {
+            com.robonix.client.AppLog.write("CONV", "restoreLastSession failed: ${e.message}", e)
+        }
+    }
+
+    /** Delete every locally stored conversation and reset the current chat. */
+    fun clearAllSessions() {
+        submitJob?.cancel()
+        submitJob = null
+        stopVoiceSession()
+        viewModelScope.launch {
+            try {
+                conversationStore.clearAll()
+            } catch (e: Exception) {
+                com.robonix.client.AppLog.write("CONV", "clearAll failed: ${e.message}", e)
+            }
+            rtdlState.clear()
+            _uiState.update { ChatUiState(settings = it.settings) }
+            loadSessions()
+        }
     }
 
     fun updateSettings(settings: ClientSettings) {
@@ -98,7 +171,7 @@ class ChatViewModel @Inject constructor(
             addMessage(ChatMessage(
                 id = chatRepository.generateMessageId(),
                 role = MessageRole.Error,
-                text = "Configure Robot Host in Settings first.",
+                text = l("chat.configure.first"),
             ))
         }
         return ep
@@ -121,10 +194,10 @@ class ChatViewModel @Inject constructor(
         ))
         addTimeline(createTimelineEvent(
             if (wasBusy) "steer" else "task",
-            if (wasBusy) "steer: $text" else "task: $text",
+            if (wasBusy) l("tl.steer", text) else l("tl.task", text),
         ))
 
-        _uiState.update { it.copy(isBusy = true, isTaskRunning = true) }
+        _uiState.update { it.copy(isBusy = true, isTaskRunning = true, liveStatus = null) }
 
         submitJob?.cancel()
         submitJob = viewModelScope.launch {
@@ -141,11 +214,15 @@ class ChatViewModel @Inject constructor(
                 addMessage(ChatMessage(
                     id = chatRepository.generateMessageId(),
                     role = MessageRole.Error,
-                    text = "Task failed: ${e.message ?: "unknown error"}",
+                    text = l("chat.task.failed", e.message ?: l("common.unknown.error")),
                 ))
-                addTimeline(createTimelineEvent("error", "task error: ${e.message ?: "unknown"}"))
+                addTimeline(createTimelineEvent("error", l("tl.error.task", e.message ?: l("common.unknown.error"))))
             } finally {
                 _uiState.update { it.copy(isBusy = false, isTaskRunning = false) }
+                // The stream has closed, so every text chunk is in — persist the
+                // full exchange (agent reply included), not just the user turn
+                // that a mid-stream terminal-status snapshot may have captured.
+                persistCurrentConversation()
             }
         }
     }
@@ -160,7 +237,7 @@ class ChatViewModel @Inject constructor(
             return
         }
 
-        addTimeline(createTimelineEvent("cancel", "abort requested"))
+        addTimeline(createTimelineEvent("cancel", l("tl.abort")))
         stopVoiceSession()
 
         viewModelScope.launch {
@@ -175,9 +252,9 @@ class ChatViewModel @Inject constructor(
                 addMessage(ChatMessage(
                     id = chatRepository.generateMessageId(),
                     role = MessageRole.Error,
-                    text = "Stop failed: ${e.message ?: "unknown error"}",
+                    text = l("chat.stop.failed", e.message ?: l("common.unknown.error")),
                 ))
-                addTimeline(createTimelineEvent("error", "abort error: ${e.message ?: "unknown"}"))
+                addTimeline(createTimelineEvent("error", l("tl.error.abort", e.message ?: l("common.unknown.error"))))
             }
             _uiState.update {
                 it.copy(isTaskRunning = false, activeTurnId = "", activePilotSessionId = "")
@@ -195,21 +272,23 @@ class ChatViewModel @Inject constructor(
             addMessage(ChatMessage(
                 id = chatRepository.generateMessageId(),
                 role = MessageRole.Error,
-                text = "Configure Robot Host in Settings first.",
+                text = l("chat.configure.first"),
             ))
             return
         }
 
-        _uiState.update { it.copy(voiceActive = true, isRecording = true) }
+        _uiState.update { it.copy(voiceActive = true, isRecording = true, liveStatus = null) }
+        recordingConfirmed = false
 
         val wasBusy = hasActiveTurn(state)
         addTimeline(createTimelineEvent(
             if (wasBusy) "voice steer" else "voice",
-            if (wasBusy) "voice steer requested" else "voice session requested",
+            if (wasBusy) l("tl.steer.requested") else l("tl.session.requested"),
         ))
 
         voiceJob?.cancel()
         voiceJob = viewModelScope.launch {
+            var completedNormally = false
             try {
                 val bridgeUrl = audioRepository.autoConnectBridge(
                     atlasEndpoint = target,
@@ -231,21 +310,63 @@ class ChatViewModel @Inject constructor(
                     handleVoiceEvent(event, wasBusy)
                 }
                 com.robonix.client.AppLog.write("VOICE", "Voice session completed normally")
+                completedNormally = true
             } catch (e: kotlinx.coroutines.CancellationException) {
                 com.robonix.client.AppLog.write("VOICE", "Voice session cancelled")
             } catch (e: Exception) {
                 com.robonix.client.AppLog.write("VOICE", "Voice session error: ${e.message}", e)
-                addMessage(ChatMessage(id = chatRepository.generateMessageId(), role = MessageRole.Error, text = "Voice failed: ${e.message ?: "unknown error"}"))
-                addTimeline(createTimelineEvent("error", "voice error: ${e.message ?: "unknown"}"))
+                addMessage(ChatMessage(id = chatRepository.generateMessageId(), role = MessageRole.Error, text = l("chat.voice.failed", e.message ?: l("common.unknown.error"))))
+                addTimeline(createTimelineEvent("error", l("tl.error.voice", e.message ?: l("common.unknown.error"))))
+                completedNormally = true
             } finally {
                 _uiState.update { it.copy(voiceActive = false, isRecording = false) }
+                // Only persist a real turn — a discarded/cancelled press
+                // (too-brief release, stop) leaves junk sessions behind.
+                if (completedNormally) persistCurrentConversation()
             }
         }
     }
 
+    /**
+     * Mic button released while holding to talk:
+     * - already recording → ask Liaison to finish early and submit the
+     *   recognized-so-far text (web client's finish_voice_capture);
+     * - recording not started yet → the user tapped too briefly, cancel
+     *   the whole voice session instead.
+     */
+    fun onMicReleased() {
+        val state = _uiState.value
+        if (!state.voiceActive) return
+        if (state.isRecording && recordingConfirmed && !finishInFlight) {
+            finishInFlight = true
+            addTimeline(createTimelineEvent("voice", l("tl.finishing")))
+            val target = state.settings.atlasEndpoint
+            viewModelScope.launch {
+                try {
+                    if (target.isNotBlank()) {
+                        chatRepository.finishVoiceCapture(target, state.sessionId)
+                    }
+                } catch (e: Exception) {
+                    com.robonix.client.AppLog.write("VOICE", "finishVoiceCapture failed: ${e.message}", e)
+                } finally {
+                    finishInFlight = false
+                }
+            }
+        } else if (!recordingConfirmed) {
+            // Released before the server even started recording — too brief,
+            // discard the session entirely (web: stopActiveVoiceSession).
+            stopVoiceSession()
+        }
+    }
+
+    /** Hard-stop the voice session: cancel the stream entirely (discard). */
     fun stopVoiceSession() {
         com.robonix.client.AppLog.write("VOICE", "stopVoiceSession called, voiceActive=${_uiState.value.voiceActive}")
-        _uiState.update { it.copy(isRecording = false) }
+        finishInFlight = false
+        recordingConfirmed = false
+        voiceJob?.cancel()
+        voiceJob = null
+        _uiState.update { it.copy(voiceActive = false, isRecording = false) }
     }
 
     val isVoiceProcessing: Boolean get() = _uiState.value.voiceActive && !_uiState.value.isRecording
@@ -254,7 +375,7 @@ class ChatViewModel @Inject constructor(
         _uiState.update { state ->
             state.copy(
                 messages = state.messages + message,
-                activeAgentId = if (message.role == MessageRole.Agent) null else state.activeAgentId,
+                activeAgentId = if (message.role == MessageRole.Agent) state.activeAgentId else null,
             )
         }
     }
@@ -462,8 +583,9 @@ class ChatViewModel @Inject constructor(
                     state.copy(plan = plan, planRecords = upsertPlanRecord(state.planRecords, plan))
                 }
                 pushRtdlToShared()
+                announcePlan(plan)
                 addTimeline(createTimelineEvent("plan",
-                    "live round ${plan.round}: ${plan.nodes.count { it.call != null }} call(s)"))
+                    l("tl.plan.round", plan.round, plan.nodes.count { it.call != null })))
             }
             "batch_result" -> event.batchResult?.let { batch ->
                 _uiState.update { state ->
@@ -473,7 +595,7 @@ class ChatViewModel @Inject constructor(
                 }
                 pushRtdlToShared()
                 addTimeline(createTimelineEvent(
-                    if (batch.anyFailed) "error" else "result", "round ${batch.round} result"))
+                    if (batch.anyFailed) "error" else "result", l("tl.round.result", batch.round)))
             }
             "node_state" -> event.nodeState?.let { ns ->
                 _uiState.update { state ->
@@ -484,7 +606,7 @@ class ChatViewModel @Inject constructor(
                 pushRtdlToShared()
                 addTimeline(createTimelineEvent(
                     if (ns.state == "FAILED") "error" else "status",
-                    "${ns.opId.ifBlank { "node ${ns.nodeIndex}" }} ${ns.state}"))
+                    "${ns.opId.ifBlank { l("tl.node", ns.nodeIndex) }} ${AppStrings.formatStatus(_uiState.value.settings.language, ns.state)}"))
             }
             "task_state" -> event.taskState?.let { ts ->
                 val st = ts.status.lowercase()
@@ -495,7 +617,7 @@ class ChatViewModel @Inject constructor(
                         isBusy = st !in listOf("done", "completed", "failed", "cancelled", "canceled", "aborted"),
                     )
                 }
-                addTimeline(createTimelineEvent("status", ts.status))
+                addTimeline(createTimelineEvent("status", AppStrings.formatStatus(_uiState.value.settings.language, ts.status)))
                 autoPersistIfTerminal(st)
             }
             "status" -> event.status?.message?.let { msg ->
@@ -525,7 +647,7 @@ class ChatViewModel @Inject constructor(
             }
             "asr_partial" -> {
                 // Show partial ASR result in timeline
-                addTimeline(createTimelineEvent("voice", "partial: ${event.text}"))
+                addTimeline(createTimelineEvent("voice", l("tl.partial", event.text)))
             }
             "pilot" -> {
                 com.robonix.client.AppLog.write("VOICE", "Voice pilot event received")
@@ -533,30 +655,85 @@ class ChatViewModel @Inject constructor(
             }
             "tts_started" -> {
                 _uiState.update { it.copy(ttsPlaying = true) }
-                addTimeline(createTimelineEvent("voice", "TTS started"))
+                addMessage(ChatMessage(
+                    id = chatRepository.generateMessageId(),
+                    role = MessageRole.Status, text = l("chat.tts.started"),
+                ))
+                addTimeline(createTimelineEvent("voice", l("tl.tts.started")))
             }
             "tts_done" -> {
                 _uiState.update { it.copy(ttsPlaying = false) }
-                addTimeline(createTimelineEvent("voice", "TTS done"))
+                addMessage(ChatMessage(
+                    id = chatRepository.generateMessageId(),
+                    role = MessageRole.Status, text = l("chat.tts.done"),
+                ))
+                addTimeline(createTimelineEvent("voice", l("tl.tts.done")))
             }
-            "recording_started" -> addTimeline(createTimelineEvent("voice", "Recording started"))
-            "recording_done" -> addTimeline(createTimelineEvent("voice", "Recording done"))
-            "session_started" -> addTimeline(createTimelineEvent("voice", "Session started"))
+            "recording_started" -> {
+                recordingConfirmed = true
+                addTimeline(createTimelineEvent("voice", l("tl.recording.started")))
+            }
+            "recording_done" -> {
+                finishInFlight = false
+                recordingConfirmed = false
+                _uiState.update { it.copy(isRecording = false) }
+                addTimeline(createTimelineEvent("voice", l("tl.recording.done")))
+            }
+            "session_started" -> addTimeline(createTimelineEvent("voice", l("tl.session.started")))
             "session_done" -> {
-                addTimeline(createTimelineEvent("voice", "Session done"))
-                _uiState.update { it.copy(voiceActive = false, isRecording = false) }
+                finishInFlight = false
+                recordingConfirmed = false
+                addTimeline(createTimelineEvent("voice", l("tl.session.done")))
+                _uiState.update { it.copy(voiceActive = false, isRecording = false, ttsPlaying = false) }
             }
-            "error" -> addMessage(ChatMessage(
-                id = chatRepository.generateMessageId(),
-                role = MessageRole.Error, text = event.error,
-            ))
+            "error" -> {
+                finishInFlight = false
+                recordingConfirmed = false
+                addMessage(ChatMessage(
+                    id = chatRepository.generateMessageId(),
+                    role = MessageRole.Error, text = event.error,
+                ))
+                _uiState.update { it.copy(ttsPlaying = false) }
+            }
             else -> addTimeline(createTimelineEvent("voice", event.statusMessage.ifBlank { event.kind }))
         }
     }
 
+    /**
+     * Insert a chat message announcing which capabilities a plan round will
+     * call — matches the web client's announcePlan (deduped against the
+     * previous status message so re-broadcasts of the same round don't spam).
+     */
+    private fun announcePlan(plan: RtdlPlan) {
+        val s = _uiState.value
+        val last = s.messages.lastOrNull()
+        if (last != null && last.role == MessageRole.Status && last.planRound == plan.round) return
+
+        val calls = plan.nodes.mapNotNull { it.call?.name }.distinct()
+        val text = if (calls.isEmpty()) {
+            l("chat.plan.round", plan.round)
+        } else {
+            val preview = calls.take(3).joinToString(", ")
+            val suffix = if (calls.size > 3) " ${l("chat.plan.more", calls.size - 3)}" else ""
+            l("chat.plan.calls", preview + suffix)
+        }
+        addMessage(ChatMessage(
+            id = chatRepository.generateMessageId(),
+            role = MessageRole.Status,
+            text = text,
+            meta = "RTDL",
+            planRound = plan.round,
+        ))
+    }
+
     private fun addTimeline(event: TimelineEvent) {
         _uiState.update { state ->
-            state.copy(timeline = listOf(event) + state.timeline.take(79))
+            state.copy(
+                timeline = listOf(event) + state.timeline.take(79),
+                // Surface the newest event as a live "what is happening right now"
+                // status while a turn is in flight; cleared when the turn ends.
+                liveStatus = if (state.isBusy) event.text else state.liveStatus,
+            )
         }
     }
 

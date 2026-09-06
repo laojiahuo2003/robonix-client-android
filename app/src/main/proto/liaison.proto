@@ -61,6 +61,18 @@ message StartVoiceSession_Response {
   VoiceEvent event = 1;
 }
 
+// Early finish for a running voice session: submit what has been recognized
+// so far instead of waiting for record_seconds to elapse. Separate unary
+// contract from the streaming voice session itself.
+message FinishVoiceCapture_Request {
+  string session_id = 1;
+}
+message FinishVoiceCapture_Response {
+  bool ok = 1;
+  string session_id = 2;
+  string detail = 3;
+}
+
 message WatchHandsfreeEvents_Request {}
 message WatchHandsfreeEvents_Response {
   VoiceEvent event = 1;
@@ -73,6 +85,10 @@ service RobonixSystemLiaisonSubmit {
 
 service RobonixSystemLiaisonVoice {
   rpc StartVoiceSession(StartVoiceSession_Request) returns (stream StartVoiceSession_Response);
+}
+
+service RobonixSystemLiaisonVoiceFinish {
+  rpc FinishVoiceCapture(FinishVoiceCapture_Request) returns (FinishVoiceCapture_Response);
 }
 
 service RobonixSystemLiaisonHandsfreeStatus {

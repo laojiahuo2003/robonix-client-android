@@ -30,6 +30,10 @@ class RtdlStateHolder @Inject constructor() {
     private val _planRecords = MutableStateFlow<List<PlanRecord>>(emptyList())
     val planRecords: StateFlow<List<PlanRecord>> = _planRecords.asStateFlow()
 
+    /** Increments whenever a NEW plan record appears — drives the RTDL unread badge. */
+    private val _planVersion = MutableStateFlow(0L)
+    val planVersion: StateFlow<Long> = _planVersion.asStateFlow()
+
     fun update(
         plan: RtdlPlan?,
         nodeStates: Map<Int, RtdlNodeState>,
@@ -41,6 +45,7 @@ class RtdlStateHolder @Inject constructor() {
         _livePlan.value = plan
         _liveNodeStates.value = nodeStates
         _liveBatches.value = batches
+        if (records.size > _planRecords.value.size) _planVersion.value += 1
         _planRecords.value = records
     }
 

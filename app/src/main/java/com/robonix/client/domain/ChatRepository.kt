@@ -19,6 +19,10 @@ class ChatRepository @Inject constructor(
         // Contract IDs — must match the Robonix backend exactly
         const val CONTRACT_LIAISON_SUBMIT = "robonix/system/liaison/submit"
         const val CONTRACT_LIAISON_VOICE = "robonix/system/liaison/voice"
+        const val CONTRACT_LIAISON_VOICE_FINISH = "robonix/system/liaison/voice/finish"
+        const val CONTRACT_LIAISON_HANDSFREE_STATUS = "robonix/system/liaison/handsfree/status"
+        const val CONTRACT_LIAISON_HANDSFREE_SET = "robonix/system/liaison/handsfree/set_enabled"
+        const val CONTRACT_LIAISON_HANDSFREE_EVENTS = "robonix/system/liaison/handsfree/events"
         const val DEFAULT_LIAISON_PORT = 50081
     }
 
@@ -107,6 +111,41 @@ class ChatRepository @Inject constructor(
             steer = steer,
             expectedTurnId = expectedTurnId,
         )
+    }
+
+    /**
+     * Ask Liaison to stop recording early and submit whatever has been
+     * recognized so far (web client's finish_voice_capture). The voice
+     * stream itself stays open and later delivers asr_final/session_done.
+     */
+    suspend fun finishVoiceCapture(
+        atlasEndpoint: String,
+        sessionId: String,
+    ): Result<String> {
+        val liaisonEndpoint = resolveLiaisonEndpoint(atlasEndpoint, CONTRACT_LIAISON_VOICE_FINISH)
+        return liaisonClient.finishVoiceCapture(target = liaisonEndpoint, sessionId = sessionId)
+    }
+
+    // ---- Handsfree (免提模式) ----
+
+    suspend fun getHandsfreeStatus(atlasEndpoint: String): com.robonix.client.data.model.HandsfreeStatus {
+        val ep = resolveLiaisonEndpoint(atlasEndpoint, CONTRACT_LIAISON_HANDSFREE_STATUS)
+        return liaisonClient.getHandsfreeStatus(ep)
+    }
+
+    suspend fun setHandsfreeEnabled(
+        atlasEndpoint: String,
+        enabled: Boolean,
+        micProviderId: String = "",
+        speakerProviderId: String = "",
+    ): Result<com.robonix.client.data.model.HandsfreeStatus> {
+        val ep = resolveLiaisonEndpoint(atlasEndpoint, CONTRACT_LIAISON_HANDSFREE_SET)
+        return liaisonClient.setHandsfreeEnabled(ep, enabled, micProviderId, speakerProviderId)
+    }
+
+    suspend fun watchHandsfreeEvents(atlasEndpoint: String): Flow<com.robonix.client.data.model.VoiceEvent> {
+        val ep = resolveLiaisonEndpoint(atlasEndpoint, CONTRACT_LIAISON_HANDSFREE_EVENTS)
+        return liaisonClient.watchHandsfreeEvents(ep)
     }
 
     fun generateMessageId(): String = UUID.randomUUID().toString()

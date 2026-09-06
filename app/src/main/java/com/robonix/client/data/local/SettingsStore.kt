@@ -45,7 +45,7 @@ class SettingsStore @Inject constructor(
             "userId" to (prefs[KEY_USER_ID] ?: "voice:wheatfox"),
             "sessionId" to (prefs[KEY_SESSION_ID] ?: ""),
             "recordSeconds" to (prefs[KEY_RECORD_SECONDS] ?: 30),
-            "language" to (prefs[KEY_LANGUAGE] ?: "zh"),
+            "language" to (prefs[KEY_LANGUAGE] ?: "system"),
             "micNodeId" to (prefs[KEY_MIC_NODE_ID] ?: ""),
             "micDeviceId" to (prefs[KEY_MIC_DEVICE_ID] ?: ""),
             "speakerNodeId" to (prefs[KEY_SPEAKER_NODE_ID] ?: ""),

@@ -30,6 +30,8 @@ import androidx.lifecycle.viewModelScope
 import com.robonix.client.data.model.*
 import com.robonix.client.domain.RtdlStateHolder
 import com.robonix.client.domain.SystemRepository
+import com.robonix.client.ui.i18n.t
+import com.robonix.client.ui.i18n.tStatus
 import com.robonix.client.ui.navigation.SharedViewModel
 import com.robonix.client.ui.theme.*
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -141,6 +143,14 @@ fun RtdlScreen(
     LaunchedEffect(settings.atlasEndpoint) {
         Log.w(TAG, "RtdlScreen entered, atlasEndpoint=${settings.atlasEndpoint}")
         viewModel.refreshActivePlans(settings.atlasEndpoint)
+        // Poll active plans while the tab is visible (web: 2s → mobile: 5s to
+        // save battery/radio). delay() is cancellable, so leaving the screen
+        // cancels the loop automatically.
+        while (true) {
+            kotlinx.coroutines.delay(5000)
+            val ep = sharedViewModel.settings.value.atlasEndpoint
+            if (ep.isNotBlank()) viewModel.refreshActivePlans(ep)
+        }
     }
 
     RtdlContent(state, viewModel, sharedViewModel)
@@ -178,7 +188,7 @@ private fun RtdlContent(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Default.PlayArrow, null, modifier = Modifier.size(14.dp))
                         Spacer(Modifier.width(4.dp))
-                        Text("Active (${state.executorPlans.size})", fontSize = 13.sp)
+                        Text(t("rtdl.tab.active", state.executorPlans.size), fontSize = 13.sp)
                     }
                 },
             )
@@ -190,7 +200,7 @@ private fun RtdlContent(
                         Icon(Icons.Default.History, null, modifier = Modifier.size(14.dp))
                         Spacer(Modifier.width(4.dp))
                         val historyCount = state.planRecords.size
-                        Text("History ($historyCount)", fontSize = 13.sp)
+                        Text(t("rtdl.tab.history", historyCount), fontSize = 13.sp)
                     }
                 },
             )
@@ -235,11 +245,11 @@ private fun ActivePlansTab(state: RtdlUiState, viewModel: RtdlViewModel) {
             }
             if (!state.executorPlansReady && !state.isRefreshing) {
                 item {
-                    EmptyState("Loading Executor plans...", Icons.Default.HourglassEmpty)
+                    EmptyState(t("rtdl.loading"), Icons.Default.HourglassEmpty)
                 }
             } else if (state.executorPlansReady && state.executorPlans.isEmpty()) {
                 item {
-                    EmptyState("Executor reports no active RTDL plans.", Icons.Default.Inbox)
+                    EmptyState(t("rtdl.active.empty"), Icons.Default.Inbox)
                 }
             }
             items(state.executorPlans, key = { it.planId }) { plan ->
@@ -249,7 +259,7 @@ private fun ActivePlansTab(state: RtdlUiState, viewModel: RtdlViewModel) {
             val activeRecord = state.planRecords.firstOrNull()
             if (activeRecord != null) {
                 item {
-                    SectionHeader("Live Behavior Tree")
+                    SectionHeader(t("rtdl.live.tree"))
                 }
                 item {
                     SafeBehaviorTree(
@@ -268,7 +278,7 @@ private fun PlanHistoryTab(state: RtdlUiState, viewModel: RtdlViewModel) {
     val historyRecords = state.planRecords
 
     if (historyRecords.isEmpty()) {
-        EmptyState("No completed RTDL trees yet.", Icons.Default.Inbox)
+        EmptyState(t("rtdl.history.empty"), Icons.Default.Inbox)
         return
     }
     LazyColumn(
@@ -322,14 +332,14 @@ private fun BehaviorTreeCard(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    "Plan ${plan.planId.ifBlank { "-" }}",
+                    t("rtdl.plan", plan.planId.ifBlank { "-" }),
                     color = Text,
                     fontSize = 13.sp,
                     fontWeight = FontWeight.SemiBold,
                 )
                 Surface(color = Cyan.copy(alpha = 0.1f), shape = RoundedCornerShape(999.dp)) {
                     Text(
-                        "Round ${plan.round}",
+                        t("rtdl.round", plan.round),
                         color = Cyan,
                         fontSize = 10.sp,
                         fontWeight = FontWeight.Bold,
@@ -431,7 +441,7 @@ private fun TreeNodeRow(
                 shape = RoundedCornerShape(999.dp),
             ) {
                 Text(
-                    status,
+                    tStatus(status),
                     color = statusColor,
                     fontSize = 9.sp,
                     fontWeight = FontWeight.ExtraBold,
@@ -463,13 +473,13 @@ private fun ExecutorPlanCard(plan: ExecutorPlan) {
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        plan.description.ifBlank { "Plan ${plan.planId}" },
+                        plan.description.ifBlank { t("rtdl.plan", plan.planId) },
                         color = Text,
                         fontSize = 14.sp,
                         fontWeight = FontWeight.Bold,
                     )
                     Text(
-                        "plan ${plan.planId} · ${plan.opCount} ops",
+                        t("rtdl.plan.meta", plan.planId, plan.opCount),
                         color = Muted,
                         fontSize = 11.sp,
                     )
@@ -479,7 +489,7 @@ private fun ExecutorPlanCard(plan: ExecutorPlan) {
                     shape = RoundedCornerShape(999.dp),
                 ) {
                     Text(
-                        if (plan.cancelled) "CANCELING" else "RUNNING",
+                        if (plan.cancelled) tStatus("CANCELING") else tStatus("RUNNING"),
                         color = if (plan.cancelled) Red else Green,
                         fontSize = 10.sp,
                         fontWeight = FontWeight.ExtraBold,
@@ -500,11 +510,11 @@ private fun ExecutorPlanCard(plan: ExecutorPlan) {
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
-                        Text(op.description.ifBlank { "op ${op.opId}" }, color = Text, fontSize = 12.sp)
+                        Text(op.description.ifBlank { t("rtdl.op", op.opId) }, color = Text, fontSize = 12.sp)
                         Text("${op.providerId} · ${op.contractId}", color = Cyan, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
                     }
                     Text(
-                        op.state.uppercase(),
+                        tStatus(op.state),
                         color = when (op.state.lowercase()) {
                             "running" -> Amber; "succeeded", "success", "done" -> Green
                             "failed", "error" -> Red; else -> Muted
@@ -538,20 +548,20 @@ private fun NodeDetailSheet(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("Node Detail", color = Amber, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                Text(t("rtdl.node.detail"), color = Amber, fontSize = 14.sp, fontWeight = FontWeight.Bold)
                 IconButton(onClick = onDismiss, modifier = Modifier.size(32.dp)) {
-                    Icon(Icons.Default.Close, "Close", tint = Muted, modifier = Modifier.size(20.dp))
+                    Icon(Icons.Default.Close, t("action.close"), tint = Muted, modifier = Modifier.size(20.dp))
                 }
             }
             Spacer(Modifier.height(12.dp))
 
-            DetailRow("Node", "#${node.index} ${node.call?.name ?: node.opId.ifBlank { node.kind }}")
-            DetailRow("Provider", node.call?.providerId ?: "-")
-            DetailRow("Contract", node.call?.contractId ?: "-")
-            DetailRow("Status", status)
+            DetailRow(t("rtdl.node"), "#${node.index} ${node.call?.name ?: node.opId.ifBlank { node.kind }}")
+            DetailRow(t("rtdl.node.provider"), node.call?.providerId ?: "-")
+            DetailRow(t("rtdl.node.contract"), node.call?.contractId ?: "-")
+            DetailRow(t("rtdl.node.status"), status)
 
             Spacer(Modifier.height(8.dp))
-            Text("Arguments", color = Muted, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            Text(t("rtdl.node.args"), color = Muted, fontSize = 11.sp, fontWeight = FontWeight.Bold)
             Text(
                 node.call?.args?.toString() ?: "{}",
                 color = Text,
@@ -566,7 +576,7 @@ private fun NodeDetailSheet(
 
             if (nodeState?.leafResult != null) {
                 Spacer(Modifier.height(8.dp))
-                Text("Result", color = Muted, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                Text(t("rtdl.node.result"), color = Muted, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                 Text(
                     "success=${nodeState.leafResult.success}\n${nodeState.leafResult.output.ifBlank { nodeState.leafResult.error }}",
                     color = Text,

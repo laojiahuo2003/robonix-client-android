@@ -29,6 +29,9 @@ import com.robonix.client.data.audio.AudioBridgeEvent
 import com.robonix.client.data.audio.AudioPlayer
 import com.robonix.client.data.model.*
 import com.robonix.client.domain.AudioRepository
+import com.robonix.client.ui.i18n.AppStrings
+import com.robonix.client.ui.i18n.t
+import com.robonix.client.ui.i18n.tStatus
 import com.robonix.client.ui.navigation.SharedViewModel
 import com.robonix.client.ui.theme.*
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -46,9 +49,16 @@ data class AudioUiState(
     val selectedSpeakerProvider: String = "",
     val selectedMicDevice: String = "",
     val selectedSpeakerDevice: String = "",
+    val micDevices: List<AudioDevice> = emptyList(),
+    val speakerDevices: List<AudioDevice> = emptyList(),
+    val devicesBusy: Boolean = false,
+    val applyStatus: String = "",
+    val applyOk: Boolean? = null,
     val vuLevel: Float = 0f,
     val audioLog: List<String> = emptyList(),
-    val routeStatus: String = "Load audio route first.",
+    val routeLoaded: Boolean = false,
+    val providersFound: Int = 0,
+    val routeError: String? = null,
     val testStatus: String = "",
     val testResultClass: TestResultClass = TestResultClass.None,
     val isBusy: Boolean = false,
@@ -56,6 +66,7 @@ data class AudioUiState(
     val isRecording: Boolean = false,
     val enrollUserId: String = "",
     val enrollStatus: String = "",
+    val enrollBusy: Boolean = false,
 )
 
 enum class TestResultClass { None, Success, Error }
@@ -63,6 +74,7 @@ enum class TestResultClass { None, Success, Error }
 @HiltViewModel
 class AudioViewModel @Inject constructor(
     val audioRepository: AudioRepository,
+    val handsfree: com.robonix.client.domain.HandsfreeStateHolder,
     private val audioPlayer: AudioPlayer,
     private val audioBridge: AudioBridge,
 ) : ViewModel() {
@@ -70,37 +82,193 @@ class AudioViewModel @Inject constructor(
     private val _uiState = MutableStateFlow(AudioUiState())
     val uiState: StateFlow<AudioUiState> = _uiState.asStateFlow()
 
-    fun refreshAudioRoute(target: String) {
+    private var lang: String = AppStrings.SYSTEM
+
+    /** Keep baked status strings in sync with the selected language. */
+    fun setLanguage(value: String) { lang = value }
+
+    /** Toggle hands-free mode; blocked while a push-to-talk session runs. */
+    fun toggleHandsfree(settings: ClientSettings) {
+        if (handsfree.busy.value || handsfree.voiceBusy.value) return
+        viewModelScope.launch {
+            val target = settings.atlasEndpoint
+            if (target.isBlank()) return@launch
+            val next = !(handsfree.status.value?.enabled ?: false)
+            handsfree.setEnabled(
+                target = target,
+                enabled = next,
+                micProviderId = settings.micNodeId,
+                speakerProviderId = settings.speakerNodeId,
+            )
+            handsfree.refreshOnce(target)
+        }
+    }
+
+    fun refreshAudioRoute(
+        target: String,
+        preferredMicNodeId: String = "",
+        preferredSpeakerNodeId: String = "",
+        preferredMicDeviceId: String = "",
+        preferredSpeakerDeviceId: String = "",
+    ) {
         if (target.isBlank()) {
-            _uiState.update { it.copy(routeStatus = "Set Robot Host first.") }
+            _uiState.update { it.copy(routeLoaded = false, providersFound = 0, routeError = null) }
             return
         }
         _uiState.update { it.copy(isBusy = true) }
         viewModelScope.launch {
             try {
                 val (mic, speaker, bridge) = audioRepository.getAudioProviders(target)
+                val micId = _uiState.value.selectedMicProvider.ifBlank {
+                    preferredMicNodeId.takeIf { p -> mic.any { it.id == p } } ?: ""
+                }
+                val spkId = _uiState.value.selectedSpeakerProvider.ifBlank {
+                    preferredSpeakerNodeId.takeIf { p -> speaker.any { it.id == p } } ?: ""
+                }
                 _uiState.update {
                     it.copy(
                         micProviders = mic,
                         speakerProviders = speaker,
                         bridgeProviders = bridge,
-                        routeStatus = "${mic.size + speaker.size} providers found. Select devices.",
+                        selectedMicProvider = micId,
+                        selectedSpeakerProvider = spkId,
+                        routeLoaded = true,
+                        providersFound = mic.size + speaker.size,
+                        routeError = null,
                         isBusy = false,
                     )
                 }
                 addLog("route refreshed: ${mic.size}mic ${speaker.size}spk ${bridge.size}bridge")
+                if (micId.isNotBlank()) loadMicDevices(target, micId, preferredMicDeviceId)
+                if (spkId.isNotBlank()) loadSpeakerDevices(target, spkId, preferredSpeakerDeviceId)
             } catch (e: Exception) {
-                _uiState.update { it.copy(routeStatus = "Error: ${e.message}", isBusy = false) }
+                _uiState.update { it.copy(routeError = e.message ?: "error", isBusy = false) }
             }
         }
     }
 
-    fun selectMicProvider(id: String) { _uiState.update { it.copy(selectedMicProvider = id) } }
-    fun selectSpeakerProvider(id: String) { _uiState.update { it.copy(selectedSpeakerProvider = id) } }
+    private suspend fun loadMicDevices(target: String, providerId: String, preferredDeviceId: String = "") {
+        _uiState.update { it.copy(devicesBusy = true) }
+        try {
+            val list = audioRepository.listAudioDevices(target, providerId)
+            val inputs = list.devices.filter { d -> d.kind.equals("input", ignoreCase = true) }
+            val preferred = preferredDeviceId.takeIf { p -> inputs.any { it.id == p } } ?: ""
+            _uiState.update {
+                it.copy(
+                    micDevices = inputs,
+                    selectedMicDevice = it.selectedMicDevice.ifBlank { preferred },
+                    devicesBusy = false,
+                )
+            }
+            addLog("mic devices (${providerId}): ${list.devices.size}")
+        } catch (e: Exception) {
+            _uiState.update { it.copy(micDevices = emptyList(), devicesBusy = false) }
+            addLog("mic devices failed: ${e.message}")
+        }
+    }
+
+    private suspend fun loadSpeakerDevices(target: String, providerId: String, preferredDeviceId: String = "") {
+        _uiState.update { it.copy(devicesBusy = true) }
+        try {
+            val list = audioRepository.listAudioDevices(target, providerId)
+            val outputs = list.devices.filter { d -> d.kind.equals("output", ignoreCase = true) }
+            val preferred = preferredDeviceId.takeIf { p -> outputs.any { it.id == p } } ?: ""
+            _uiState.update {
+                it.copy(
+                    speakerDevices = outputs,
+                    selectedSpeakerDevice = it.selectedSpeakerDevice.ifBlank { preferred },
+                    devicesBusy = false,
+                )
+            }
+            addLog("speaker devices (${providerId}): ${list.devices.size}")
+        } catch (e: Exception) {
+            _uiState.update { it.copy(speakerDevices = emptyList(), devicesBusy = false) }
+            addLog("speaker devices failed: ${e.message}")
+        }
+    }
+
+    fun selectMicProvider(target: String, id: String) {
+        _uiState.update { it.copy(selectedMicProvider = id, selectedMicDevice = "", micDevices = emptyList()) }
+        if (id.isNotBlank()) viewModelScope.launch { loadMicDevices(target, id) }
+    }
+
+    fun selectSpeakerProvider(target: String, id: String) {
+        _uiState.update { it.copy(selectedSpeakerProvider = id, selectedSpeakerDevice = "", speakerDevices = emptyList()) }
+        if (id.isNotBlank()) viewModelScope.launch { loadSpeakerDevices(target, id) }
+    }
+
+    fun selectMicDevice(id: String) { _uiState.update { it.copy(selectedMicDevice = id) } }
+    fun selectSpeakerDevice(id: String) { _uiState.update { it.copy(selectedSpeakerDevice = id) } }
+
+    /** Push the configured mic/speaker route to the robot (web Apply button). */
+    fun applyRoute(settings: ClientSettings) {
+        val target = settings.atlasEndpoint
+        if (target.isBlank()) {
+            _uiState.update { it.copy(applyStatus = AppStrings.format(lang, "chat.configure.first"), applyOk = false) }
+            return
+        }
+        _uiState.update {
+            it.copy(isBusy = true, applyOk = null, applyStatus = AppStrings.format(lang, "audio.route.applying"))
+        }
+        viewModelScope.launch {
+            try {
+                val count = audioRepository.applyAudioRoute(
+                    atlasEndpoint = target,
+                    micNodeId = settings.micNodeId, micDeviceId = settings.micDeviceId,
+                    speakerNodeId = settings.speakerNodeId, speakerDeviceId = settings.speakerDeviceId,
+                )
+                _uiState.update {
+                    it.copy(
+                        isBusy = false, applyOk = true,
+                        applyStatus = AppStrings.format(lang, "audio.route.applied", count),
+                    )
+                }
+                addLog("route applied: $count device(s)")
+            } catch (e: Exception) {
+                _uiState.update {
+                    it.copy(
+                        isBusy = false, applyOk = false,
+                        applyStatus = AppStrings.format(lang, "audio.route.apply.failed", e.message ?: ""),
+                    )
+                }
+            }
+        }
+    }
+
     fun updateEnrollUserId(id: String) { _uiState.update { it.copy(enrollUserId = id) } }
 
+    /** Record ~6s locally and enroll as the user's voiceprint. */
+    fun enrollVoiceprint(settings: ClientSettings) {
+        val state = _uiState.value
+        if (state.enrollBusy) return
+        val target = settings.atlasEndpoint
+        if (target.isBlank()) {
+            _uiState.update { it.copy(enrollStatus = AppStrings.format(lang, "chat.configure.first")) }
+            return
+        }
+        _uiState.update { it.copy(enrollBusy = true, enrollStatus = AppStrings.format(lang, "audio.vp.recording")) }
+        viewModelScope.launch {
+            try {
+                val outcome = audioRepository.enrollVoiceprint(
+                    atlasEndpoint = target,
+                    voiceprintNodeId = settings.voiceprintNodeId,
+                    userId = state.enrollUserId,
+                    userName = state.enrollUserId,
+                )
+                _uiState.update {
+                    it.copy(enrollBusy = false, enrollStatus = AppStrings.format(lang, "audio.vp.enrolled", outcome))
+                }
+                addLog("voiceprint: $outcome")
+            } catch (e: Exception) {
+                _uiState.update {
+                    it.copy(enrollBusy = false, enrollStatus = AppStrings.format(lang, "audio.vp.failed", e.message ?: ""))
+                }
+            }
+        }
+    }
+
     fun testMicrophone() {
-        _uiState.update { it.copy(isBusy = true, testStatus = "Capturing 1s...", testResultClass = TestResultClass.None) }
+        _uiState.update { it.copy(isBusy = true, testStatus = AppStrings.format(lang, "audio.diag.capturing"), testResultClass = TestResultClass.None) }
         viewModelScope.launch {
             try {
                 val pcm = audioRepository.recordForDuration(1.0f)
@@ -108,7 +276,7 @@ class AudioViewModel @Inject constructor(
                 _uiState.update {
                     it.copy(
                         isBusy = false,
-                        testStatus = "OK: ${pcm.size} bytes, RMS ${"%.4f".format(rms)}",
+                        testStatus = AppStrings.format(lang, "audio.diag.mic.ok", pcm.size, "%.4f".format(rms)),
                         testResultClass = TestResultClass.Success,
                     )
                 }
@@ -117,7 +285,7 @@ class AudioViewModel @Inject constructor(
                 _uiState.update {
                     it.copy(
                         isBusy = false,
-                        testStatus = "Failed: ${e.message}",
+                        testStatus = AppStrings.format(lang, "audio.diag.failed", e.message ?: ""),
                         testResultClass = TestResultClass.Error,
                     )
                 }
@@ -126,12 +294,12 @@ class AudioViewModel @Inject constructor(
     }
 
     fun testSpeaker() {
-        _uiState.update { it.copy(isBusy = true, testStatus = "Playing tone...") }
+        _uiState.update { it.copy(isBusy = true, testStatus = AppStrings.format(lang, "audio.diag.tone")) }
         addLog("speaker test: playing 440Hz tone")
         val tone = generateTestTone(440f, 0.4f, 16000)
         audioPlayer.play(tone)
         _uiState.update {
-            it.copy(isBusy = false, testStatus = "Tone played", testResultClass = TestResultClass.Success)
+            it.copy(isBusy = false, testStatus = AppStrings.format(lang, "audio.diag.tone.ok"), testResultClass = TestResultClass.Success)
         }
     }
 
@@ -184,17 +352,42 @@ fun AudioScreen(
 ) {
     val state by viewModel.uiState.collectAsState()
     val settings by sharedViewModel.settings.collectAsState()
+    val handsfreeStatus by viewModel.handsfree.status.collectAsState()
+    val handsfreeBusy by viewModel.handsfree.busy.collectAsState()
+    val handsfreeError by viewModel.handsfree.error.collectAsState()
+    val voiceBusy by viewModel.handsfree.voiceBusy.collectAsState()
     val context = LocalContext.current
 
-    // Permission launcher
+    // Permission launchers
     val permLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
         if (granted) viewModel.testMicrophone()
     }
+    val enrollPermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) viewModel.enrollVoiceprint(sharedViewModel.settings.value)
+    }
 
     LaunchedEffect(settings.atlasEndpoint) {
-        viewModel.refreshAudioRoute(settings.atlasEndpoint)
+        viewModel.refreshAudioRoute(
+            settings.atlasEndpoint, settings.micNodeId, settings.speakerNodeId,
+            settings.micDeviceId, settings.speakerDeviceId)
+    }
+
+    LaunchedEffect(settings.language) {
+        viewModel.setLanguage(settings.language)
+    }
+
+    // Hands-free status polling lives only while this screen is visible.
+    // Explicit stop → start so a changed endpoint restarts with the new target.
+    LaunchedEffect(settings.atlasEndpoint) {
+        viewModel.handsfree.stopPolling()
+        viewModel.handsfree.startPolling(settings.atlasEndpoint)
+    }
+    DisposableEffect(Unit) {
+        onDispose { viewModel.handsfree.stopPolling() }
     }
 
     LazyColumn(
@@ -205,45 +398,164 @@ fun AudioScreen(
     ) {
         // Audio Route
         item {
-            PanelCard("Robonix Audio Route", subtitle = "Select mic/speaker primitives") {
-                // Input
-                Text("Input Primitive", color = Muted, fontSize = 11.sp)
+            PanelCard(t("audio.route.title"), subtitle = t("audio.route.subtitle")) {
+                // Input provider
+                Text(t("audio.route.input"), color = Muted, fontSize = 11.sp)
                 Dropdown(
                     state.micProviders.associate { it.id to "${it.id} (${it.namespace})" },
                     state.selectedMicProvider,
-                    { viewModel.selectMicProvider(it) },
-                    "Select input primitive",
+                    { id ->
+                        viewModel.selectMicProvider(settings.atlasEndpoint, id)
+                        sharedViewModel.updateSettings { it.copy(micNodeId = id) }
+                    },
+                    t("audio.route.select.input"),
                 )
                 Spacer(Modifier.height(6.dp))
 
-                // Output
-                Text("Output Primitive", color = Muted, fontSize = 11.sp)
+                // Input device (from the selected provider)
+                Text(t("audio.route.device.input"), color = Muted, fontSize = 11.sp)
+                Dropdown(
+                    state.micDevices.associate { it.id to it.name.ifBlank { it.id } },
+                    state.selectedMicDevice,
+                    { id ->
+                        viewModel.selectMicDevice(id)
+                        sharedViewModel.updateSettings { it.copy(micDeviceId = id) }
+                    },
+                    if (state.devicesBusy) t("audio.route.device.loading") else t("audio.route.device.none"),
+                )
+                Spacer(Modifier.height(6.dp))
+
+                // Output provider
+                Text(t("audio.route.output"), color = Muted, fontSize = 11.sp)
                 Dropdown(
                     state.speakerProviders.associate { it.id to "${it.id} (${it.namespace})" },
                     state.selectedSpeakerProvider,
-                    { viewModel.selectSpeakerProvider(it) },
-                    "Select output primitive",
+                    { id ->
+                        viewModel.selectSpeakerProvider(settings.atlasEndpoint, id)
+                        sharedViewModel.updateSettings { it.copy(speakerNodeId = id) }
+                    },
+                    t("audio.route.select.output"),
+                )
+                Spacer(Modifier.height(6.dp))
+
+                // Output device
+                Text(t("audio.route.device.output"), color = Muted, fontSize = 11.sp)
+                Dropdown(
+                    state.speakerDevices.associate { it.id to it.name.ifBlank { it.id } },
+                    state.selectedSpeakerDevice,
+                    { id ->
+                        viewModel.selectSpeakerDevice(id)
+                        sharedViewModel.updateSettings { it.copy(speakerDeviceId = id) }
+                    },
+                    if (state.devicesBusy) t("audio.route.device.loading") else t("audio.route.device.none"),
                 )
                 Spacer(Modifier.height(10.dp))
 
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(
-                        onClick = { viewModel.refreshAudioRoute(settings.atlasEndpoint) },
+                        onClick = {
+                            viewModel.refreshAudioRoute(
+                                settings.atlasEndpoint, settings.micNodeId, settings.speakerNodeId,
+                                settings.micDeviceId, settings.speakerDeviceId)
+                        },
                         modifier = Modifier.weight(1f),
                         shape = RoundedCornerShape(8.dp),
                     ) {
                         Icon(Icons.Default.Refresh, null, modifier = Modifier.size(16.dp))
                         Spacer(Modifier.width(4.dp))
-                        Text("Refresh", fontSize = 12.sp)
+                        Text(t("action.refresh"), fontSize = 12.sp)
+                    }
+                    Button(
+                        onClick = {
+                            sharedViewModel.saveSettings()
+                            viewModel.applyRoute(sharedViewModel.settings.value)
+                        },
+                        enabled = !state.isBusy,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(8.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Blue, contentColor = Bg),
+                    ) {
+                        Icon(Icons.Default.Check, null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text(t("audio.route.apply"), fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     }
                 }
-                Text(state.routeStatus, color = Muted, fontSize = 11.sp)
+                val routeError = state.routeError
+                val routeStatus = when {
+                    state.applyStatus.isNotBlank() -> state.applyStatus
+                    routeError != null -> t("audio.route.status.error", routeError)
+                    state.routeLoaded -> t("audio.route.status.found", state.providersFound)
+                    settings.atlasEndpoint.isBlank() -> t("audio.route.status.first")
+                    else -> t("audio.route.status.initial")
+                }
+                Text(
+                    routeStatus,
+                    color = when (state.applyOk) {
+                        true -> Green
+                        false -> Red
+                        else -> Muted
+                    },
+                    fontSize = 11.sp,
+                )
+            }
+        }
+
+        // Hands-free mode
+        item {
+            PanelCard(t("audio.hf.title"), subtitle = t("audio.hf.subtitle")) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            when {
+                                handsfreeStatus?.enabled == true ->
+                                    handsfreeStatus?.state?.takeIf { it.isNotBlank() }?.let { s -> t("audio.hf.on") + " · " + tStatus(s) }
+                                        ?: t("audio.hf.on")
+                                else -> t("audio.hf.off")
+                            },
+                            color = if (handsfreeStatus?.enabled == true) Green else Muted,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                        )
+                        if (handsfreeStatus?.keyword?.isNotBlank() == true) {
+                            Text(
+                                t("audio.hf.keyword", handsfreeStatus?.keyword ?: ""),
+                                color = Cyan, fontSize = 11.sp,
+                            )
+                        }
+                        if (handsfreeStatus?.lastTranscript?.isNotBlank() == true) {
+                            Text(
+                                t("audio.hf.last.transcript", handsfreeStatus?.lastTranscript ?: ""),
+                                color = Muted, fontSize = 11.sp, maxLines = 1,
+                            )
+                        }
+                    }
+                    Switch(
+                        checked = handsfreeStatus?.enabled == true,
+                        onCheckedChange = { viewModel.toggleHandsfree(sharedViewModel.settings.value) },
+                        enabled = !handsfreeBusy && !voiceBusy,
+                        colors = SwitchDefaults.colors(
+                            checkedTrackColor = Green,
+                            checkedThumbColor = Bg,
+                        ),
+                    )
+                }
+                if (voiceBusy) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(t("audio.hf.voicebusy"), color = Amber, fontSize = 11.sp)
+                }
+                if (handsfreeError != null) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(t("audio.hf.error", handsfreeError ?: ""), color = Red, fontSize = 11.sp)
+                }
             }
         }
 
         // Diagnostics
         item {
-            PanelCard("Diagnostics", subtitle = "Test audio devices") {
+            PanelCard(t("audio.diag.title"), subtitle = t("audio.diag.subtitle")) {
                 val hasPerm = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
                     PackageManager.PERMISSION_GRANTED
 
@@ -253,7 +565,7 @@ fun AudioScreen(
                         colors = ButtonDefaults.buttonColors(containerColor = Amber),
                         shape = RoundedCornerShape(8.dp),
                     ) {
-                        Text("Grant Microphone Permission", fontSize = 12.sp)
+                        Text(t("audio.diag.grant"), fontSize = 12.sp)
                     }
                     Spacer(Modifier.height(8.dp))
                 }
@@ -270,7 +582,7 @@ fun AudioScreen(
                     ) {
                         Icon(Icons.Default.Mic, null, modifier = Modifier.size(16.dp))
                         Spacer(Modifier.width(4.dp))
-                        Text("Test Mic", fontSize = 12.sp)
+                        Text(t("audio.diag.mic"), fontSize = 12.sp)
                     }
                     FilledTonalButton(
                         onClick = { viewModel.testSpeaker() },
@@ -280,7 +592,7 @@ fun AudioScreen(
                     ) {
                         Icon(Icons.Default.VolumeUp, null, modifier = Modifier.size(16.dp))
                         Spacer(Modifier.width(4.dp))
-                        Text("Test Speaker", fontSize = 12.sp)
+                        Text(t("audio.diag.spk"), fontSize = 12.sp)
                     }
                 }
 
@@ -319,7 +631,7 @@ fun AudioScreen(
 
         // VU Meter
         item {
-            PanelCard("Input Level", subtitle = "Real-time VU meter") {
+            PanelCard(t("audio.vu.title"), subtitle = t("audio.vu.subtitle")) {
                 if (state.isRecording) {
                     VuMeter(state.vuLevel)
                     Text("${(state.vuLevel * 100).toInt()}%", color = Text, fontSize = 14.sp, fontWeight = FontWeight.Bold)
@@ -327,25 +639,25 @@ fun AudioScreen(
                         onClick = { viewModel.stopRecording() },
                         colors = ButtonDefaults.buttonColors(containerColor = Red),
                         shape = RoundedCornerShape(8.dp),
-                    ) { Text("Stop Recording", fontSize = 12.sp) }
+                    ) { Text(t("audio.vu.stop"), fontSize = 12.sp) }
                 } else {
-                    Text("Start recording to see levels.", color = Muted, fontSize = 12.sp)
+                    Text(t("audio.vu.hint"), color = Muted, fontSize = 12.sp)
                     Spacer(Modifier.height(6.dp))
                     OutlinedButton(
                         onClick = { viewModel.startRecording() },
                         shape = RoundedCornerShape(8.dp),
-                    ) { Text("Start Recording", fontSize = 12.sp) }
+                    ) { Text(t("audio.vu.start"), fontSize = 12.sp) }
                 }
             }
         }
 
         // Voiceprint
         item {
-            PanelCard("Voiceprint", subtitle = "Enroll your voice") {
+            PanelCard(t("audio.vp.title"), subtitle = t("audio.vp.subtitle")) {
                 OutlinedTextField(
                     value = state.enrollUserId,
                     onValueChange = { viewModel.updateEnrollUserId(it) },
-                    label = { Text("User ID", fontSize = 12.sp) },
+                    label = { Text(t("audio.vp.user"), fontSize = 12.sp) },
                     modifier = Modifier.fillMaxWidth(),
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedTextColor = Text, unfocusedTextColor = Text,
@@ -358,21 +670,44 @@ fun AudioScreen(
                 )
                 Spacer(Modifier.height(8.dp))
                 Button(
-                    onClick = { },
-                    enabled = state.enrollUserId.isNotBlank(),
+                    onClick = {
+                        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+                            PackageManager.PERMISSION_GRANTED
+                        ) {
+                            viewModel.enrollVoiceprint(sharedViewModel.settings.value)
+                        } else {
+                            enrollPermLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                        }
+                    },
+                    enabled = state.enrollUserId.isNotBlank() && !state.enrollBusy,
                     colors = ButtonDefaults.buttonColors(containerColor = Blue),
                     shape = RoundedCornerShape(8.dp),
                     modifier = Modifier.fillMaxWidth(),
-                ) { Text("Enroll Voice", fontSize = 12.sp, fontWeight = FontWeight.Bold) }
+                ) {
+                    Icon(
+                        Icons.Default.Mic, null,
+                        tint = if (state.enrollBusy) Red else Bg,
+                        modifier = Modifier.size(16.dp),
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        if (state.enrollBusy) t("audio.vp.recording") else t("audio.vp.enroll"),
+                        fontSize = 12.sp, fontWeight = FontWeight.Bold,
+                    )
+                }
+                if (state.enrollStatus.isNotBlank()) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(state.enrollStatus, color = Muted, fontSize = 11.sp)
+                }
             }
         }
 
         // Log
         item {
-            PanelCard("Audio Log", subtitle = "Recent events") {
+            PanelCard(t("audio.log.title"), subtitle = t("audio.log.subtitle")) {
                 val logs = state.audioLog.takeLast(20)
                 if (logs.isEmpty()) {
-                    Text("No log entries yet.", color = Muted, fontSize = 11.sp)
+                    Text(t("audio.log.empty"), color = Muted, fontSize = 11.sp)
                 } else {
                     logs.forEach { line ->
                         Text(
@@ -435,7 +770,7 @@ fun Dropdown(
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             if (options.isEmpty()) {
                 DropdownMenuItem(
-                    text = { Text("None available", fontSize = 12.sp, color = Muted) },
+                    text = { Text(t("audio.route.none"), fontSize = 12.sp, color = Muted) },
                     onClick = { expanded = false },
                 )
             }

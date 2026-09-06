@@ -161,12 +161,22 @@ class AtlasClient @Inject constructor(
          * client's rewrite_remote_endpoint behaviour: a provider running on the robot
          * may bind to 0.0.0.0 or 127.0.0.1, but the endpoint it returns refers to
          * itself, not to this device.
+         *
+         * Additionally, this is a single-robot client: every subsystem (liaison,
+         * executor, vitals, audio, handsfree, ...) is co-located on the robot that
+         * Atlas points at. A provider may advertise the robot's *other* address
+         * (e.g. its Tailscale/mesh IP, reachable by the web client but not by a
+         * phone on the robot's LAN). In that case we still route to the port the
+         * provider advertised, but on the Atlas host — the one address this phone
+         * is configured to reach. When the advertised host already IS the Atlas
+         * host this is a no-op.
          */
         fun rewriteRemoteEndpoint(endpoint: String, atlasTarget: String): String {
             val raw = endpoint.trim()
             if (raw.isEmpty()) return raw
 
             val atlasHost = atlasTarget.substringBeforeLast(":")
+            if (atlasHost.isBlank()) return raw
 
             // Split endpoint into host:port
             val lastColon = raw.lastIndexOf(':')
@@ -175,13 +185,15 @@ class AtlasClient @Inject constructor(
             val endpointHost = raw.substring(0, lastColon)
             val endpointPort = raw.substring(lastColon + 1)
 
-            val isLoopback = endpointHost.isEmpty() ||
+            val hostIsLoopback = endpointHost.isEmpty() ||
                 endpointHost == "127.0.0.1" ||
                 endpointHost.equals("localhost", ignoreCase = true) ||
                 endpointHost == "::1" ||
                 endpointHost == "0.0.0.0"
 
-            return if (isLoopback && atlasHost.isNotBlank()) {
+            val hostDiffers = endpointHost != atlasHost
+
+            return if (hostIsLoopback || hostDiffers) {
                 "$atlasHost:$endpointPort"
             } else {
                 raw

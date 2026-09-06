@@ -7,7 +7,7 @@ data class ClientSettings(
     val userId: String = "voice:wheatfox",
     val sessionId: String = "",
     val recordSeconds: Int = 30,
-    val language: String = "zh",
+    val language: String = "system",
     val micNodeId: String = "",
     val micDeviceId: String = "",
     val speakerNodeId: String = "",
