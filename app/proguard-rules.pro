@@ -15,6 +15,10 @@
 # Generated proto classes
 -keep class robonix.** { *; }
 
+# SnakeYAML (soma robot description) — references java.beans, absent on Android
+-dontwarn java.beans.**
+-keep class org.yaml.snakeyaml.** { *; }
+
 # Hilt
 -keep class dagger.hilt.** { *; }
 -keep class javax.inject.** { *; }

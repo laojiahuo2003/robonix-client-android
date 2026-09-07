@@ -34,3 +34,8 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Release signing (private — never commit these)
+keystore/*.jks
+keystore/*.properties
+keystore/*.keystore

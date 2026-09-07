@@ -1,9 +1,20 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("com.google.dagger.hilt.android")
     id("com.google.protobuf")
     id("com.google.devtools.ksp")
+}
+
+// Release signing credentials live in keystore/release.properties (gitignored),
+// so the private key is never in the repo. When the file is absent the release
+// buildType simply stays unsigned.
+val keystoreProps = rootProject.file("keystore/release.properties")
+val hasReleaseSigning = keystoreProps.exists()
+val releaseSigningProps = Properties().apply {
+    if (hasReleaseSigning) keystoreProps.inputStream().use { load(it) }
 }
 
 android {
@@ -14,8 +25,19 @@ android {
         applicationId = "com.robonix.client"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.2.0-android"
+        versionCode = 2
+        versionName = "0.3.0"
+    }
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = rootProject.file(releaseSigningProps.getProperty("storeFile"))
+                storePassword = releaseSigningProps.getProperty("storePassword")
+                keyAlias = releaseSigningProps.getProperty("keyAlias")
+                keyPassword = releaseSigningProps.getProperty("keyPassword")
+            }
+        }
     }
 
     buildTypes {
@@ -25,6 +47,9 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 
