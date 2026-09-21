@@ -25,8 +25,8 @@ android {
         applicationId = "com.robonix.client"
         minSdk = 26
         targetSdk = 34
-        versionCode = 2
-        versionName = "0.3.0"
+        versionCode = 3
+        versionName = "0.3.1"
     }
 
     signingConfigs {
@@ -49,6 +49,8 @@ android {
             )
             if (hasReleaseSigning) {
                 signingConfig = signingConfigs.getByName("release")
+            } else {
+                signingConfig = signingConfigs.getByName("debug")
             }
         }
     }

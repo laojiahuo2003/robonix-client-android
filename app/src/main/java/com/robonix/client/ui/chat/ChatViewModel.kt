@@ -52,6 +52,8 @@ data class ChatUiState(
     val isRecording: Boolean = false,
     /** Text of the most recent live event while a turn is busy; null when idle. */
     val liveStatus: String? = null,
+    /** Incremented on every token chunk arrival so Compose can auto-scroll accurately */
+    val streamTokenCount: Long = 0L,
 )
 
 data class PlanRecord(
@@ -384,9 +386,12 @@ class ChatViewModel @Inject constructor(
         _uiState.update { state ->
             val activeId = state.activeAgentId
             if (activeId != null) {
-                state.copy(messages = state.messages.map { msg ->
-                    if (msg.id == activeId) msg.copy(text = msg.text + text) else msg
-                })
+                state.copy(
+                    messages = state.messages.map { msg ->
+                        if (msg.id == activeId) msg.copy(text = msg.text + text) else msg
+                    },
+                    streamTokenCount = state.streamTokenCount + 1,
+                )
             } else {
                 val newId = chatRepository.generateMessageId()
                 state.copy(
@@ -395,6 +400,7 @@ class ChatViewModel @Inject constructor(
                         text = text, meta = "Robonix",
                     ),
                     activeAgentId = newId,
+                    streamTokenCount = state.streamTokenCount + 1,
                 )
             }
         }
@@ -431,20 +437,21 @@ class ChatViewModel @Inject constructor(
         val state = _uiState.value
         if (state.isBusy) return  // Don't switch while task is running
 
-        // Persist current conversation before clearing
-        persistCurrentConversation()
-        _uiState.update { ChatUiState(settings = it.settings) }
-        rtdlState.clear()
-        viewModelScope.launch { loadSessions() }
+        viewModelScope.launch {
+            persistConversationDirect(_uiState.value)
+            _uiState.update { ChatUiState(settings = it.settings) }
+            rtdlState.clear()
+            loadSessions()
+        }
     }
 
     fun switchToSession(sessionId: String) {
         val state = _uiState.value
         if (state.isBusy || state.sessionId == sessionId) return
 
-        persistCurrentConversation()
-
         viewModelScope.launch {
+            persistConversationDirect(_uiState.value)
+
             val all = conversationStore.loadAll()
             val target = all.find { it.id == sessionId } ?: return@launch
 
@@ -464,7 +471,7 @@ class ChatViewModel @Inject constructor(
                     activeAgentId = null,
                 )
             }
-            loadSessions()
+            _sessions.value = all
         }
     }
 
@@ -486,50 +493,64 @@ class ChatViewModel @Inject constructor(
      */
     private fun persistCurrentConversation() {
         viewModelScope.launch {
-            try {
-                val s = _uiState.value
-                if (s.messages.isEmpty() && s.timeline.isEmpty()) return@launch  // nothing to save
+            persistConversationDirect(_uiState.value)
+        }
+    }
 
-                val title = s.sessionTitle.ifBlank {
-                    s.messages.firstOrNull { it.role == MessageRole.User }?.text?.take(60) ?: "Untitled"
-                }
+    private suspend fun persistConversationDirect(s: ChatUiState) {
+        try {
+            if (s.messages.isEmpty() && s.timeline.isEmpty()) return  // nothing to save
 
-                // Serialize to JSON matching web client's conversation shape
-                val msgsJson = JSONArray().apply {
-                    s.messages.forEach { m ->
-                        put(JSONObject().apply {
-                            put("role", m.role.name)
-                            put("text", m.text)
-                            put("meta", m.meta)
-                        })
-                    }
-                }.toString()
-
-                val tlJson = JSONArray().apply {
-                    s.timeline.forEach { t ->
-                        put(JSONObject().apply {
-                            put("kind", t.kind)
-                            put("text", t.text)
-                        })
-                    }
-                }.toString()
-
-                val conv = Conversation(
-                    id = s.sessionId,
-                    title = title,
-                    updatedAt = System.currentTimeMillis(),
-                    messagesJson = msgsJson,
-                    timelineJson = tlJson,
-                )
-
-                val all = conversationStore.loadAll().toMutableList()
-                all.removeAll { it.id == conv.id }
-                all.add(0, conv)
-                conversationStore.saveAll(all)
-                loadSessions()
-            } catch (e: Exception) {
-                com.robonix.client.AppLog.write("CONV", "persist failed: ${e.message}", e)
+            val title = s.sessionTitle.ifBlank {
+                s.messages.firstOrNull { it.role == MessageRole.User }?.text?.take(60) ?: "新会话"
             }
+
+            // Serialize to JSON matching web client's conversation shape
+            val msgsJson = JSONArray().apply {
+                s.messages.forEach { m ->
+                    put(JSONObject().apply {
+                        put("id", m.id)
+                        put("role", m.role.name)
+                        put("text", m.text)
+                        put("meta", m.meta)
+                        put("timestamp", m.timestamp)
+                    })
+                }
+            }.toString()
+
+            val tlJson = JSONArray().apply {
+                s.timeline.forEach { t ->
+                    put(JSONObject().apply {
+                        put("kind", t.kind)
+                        put("text", t.text)
+                        put("timestamp", t.timestamp)
+                    })
+                }
+            }.toString()
+
+            val all = conversationStore.loadAll().toMutableList()
+            val existing = all.find { it.id == s.sessionId }
+            val updatedTime = if (existing != null && existing.messagesJson == msgsJson && existing.title == title) {
+                existing.updatedAt
+            } else {
+                System.currentTimeMillis()
+            }
+
+            val conv = Conversation(
+                id = s.sessionId,
+                title = title,
+                updatedAt = updatedTime,
+                messagesJson = msgsJson,
+                timelineJson = tlJson,
+            )
+
+            all.removeAll { it.id == conv.id }
+            all.add(conv)
+            all.sortByDescending { it.updatedAt }
+            conversationStore.saveAll(all)
+            _sessions.value = all
+        } catch (e: Exception) {
+            com.robonix.client.AppLog.write("CONV", "persist failed: ${e.message}", e)
         }
     }
 
@@ -547,11 +568,13 @@ class ChatViewModel @Inject constructor(
             val arr = JSONArray(json)
             return (0 until arr.length()).map { i ->
                 val obj = arr.getJSONObject(i)
+                val ts = obj.optLong("timestamp", 0L).let { if (it > 0) it else System.currentTimeMillis() }
                 ChatMessage(
-                    id = chatRepository.generateMessageId(),
+                    id = obj.optString("id", chatRepository.generateMessageId()),
                     role = try { MessageRole.valueOf(obj.getString("role")) } catch (_: Exception) { MessageRole.Agent },
                     text = obj.optString("text", ""),
                     meta = obj.optString("meta", ""),
+                    timestamp = ts,
                 )
             }
         } catch (_: Exception) { return emptyList() }
@@ -562,7 +585,11 @@ class ChatViewModel @Inject constructor(
             val arr = JSONArray(json)
             return (0 until arr.length()).map { i ->
                 val obj = arr.getJSONObject(i)
-                TimelineEvent(obj.optString("kind", ""), obj.optString("text", ""), "")
+                TimelineEvent(
+                    kind = obj.optString("kind", ""),
+                    text = obj.optString("text", ""),
+                    timestamp = obj.optString("timestamp", ""),
+                )
             }
         } catch (_: Exception) { return emptyList() }
     }

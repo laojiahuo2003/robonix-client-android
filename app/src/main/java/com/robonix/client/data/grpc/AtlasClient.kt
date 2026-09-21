@@ -144,6 +144,36 @@ class AtlasClient @Inject constructor(
         connectCapability(target, provider.id, contractId)
     }
 
+data class McpEndpoint(
+    val url: String,
+    val hostHeader: String? = null,
+)
+
+    suspend fun discoverMcpEndpoint(
+        target: String, contractId: String,
+    ): McpEndpoint = withContext(Dispatchers.IO) {
+        val channel = channelProvider.getChannel(target)
+        val request = QueryRequest.newBuilder().apply {
+            this.contractId = contractId
+            transport = Transport.TRANSPORT_MCP
+        }.build()
+        val response = ClientCalls.blockingUnaryCall(
+            channel.newCall(QUERY_METHOD, io.grpc.CallOptions.DEFAULT), request)
+        val provider = response.providersList.firstOrNull { p ->
+            p.capabilitiesList.any { it.contractId == contractId }
+        } ?: throw RuntimeException("no MCP provider found for $contractId")
+
+        val connectReq = ConnectCapabilityRequest.newBuilder()
+            .setConsumerId("robonix-client/android")
+            .setProviderId(provider.id)
+            .setContractId(contractId)
+            .setTransport(Transport.TRANSPORT_MCP)
+            .build()
+        val rawEndpoint = ClientCalls.blockingUnaryCall(
+            channel.newCall(CONNECT_METHOD, io.grpc.CallOptions.DEFAULT), connectReq).endpoint
+        rewriteMcpEndpoint(rawEndpoint.trim().trimEnd('/'), target)
+    }
+
     suspend fun listAudioProviders(target: String):
         Triple<List<AudioProvider>, List<AudioProvider>, List<AudioProvider>> =
         withContext(Dispatchers.IO) {
@@ -198,6 +228,27 @@ class AtlasClient @Inject constructor(
             } else {
                 raw
             }
+        }
+
+        fun rewriteMcpEndpoint(rawEndpoint: String, atlasTarget: String): McpEndpoint {
+            val raw = rawEndpoint.trim().trimEnd('/')
+            if (raw.isEmpty()) return McpEndpoint("")
+
+            val uriString = if (raw.contains("://")) raw else "http://$raw"
+            val uri = try {
+                java.net.URI(uriString)
+            } catch (_: Exception) {
+                return McpEndpoint(uriString, null)
+            }
+
+            val host = uri.host ?: "127.0.0.1"
+            val port = if (uri.port != -1) uri.port else 80
+            val path = uri.rawPath?.trimEnd('/') ?: ""
+            val atlasHost = atlasTarget.substringBeforeLast(":").trim()
+
+            val dialedUrl = "${uri.scheme ?: "http"}://$atlasHost:$port$path"
+            val hostHeader = if (uri.port != -1) "$host:$port" else host
+            return McpEndpoint(url = dialedUrl, hostHeader = hostHeader)
         }
     }
 }

@@ -45,13 +45,44 @@ fun UrdfViewer(
                 setBackgroundColor(0xFF081115.toInt())
                 settings.javaScriptEnabled = true
                 settings.domStorageEnabled = true
+                settings.allowFileAccess = true
+                settings.allowContentAccess = true
                 settings.mediaPlaybackRequiresUserGesture = false
+                setOnTouchListener { v, event ->
+                    when (event.action) {
+                        android.view.MotionEvent.ACTION_DOWN -> v.parent?.requestDisallowInterceptTouchEvent(true)
+                        android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> v.parent?.requestDisallowInterceptTouchEvent(false)
+                    }
+                    false
+                }
                 var lastLayoutH = -1
                 addOnLayoutChangeListener { _, l, t, r, b, _, _, _, _ ->
                     val h = b - t
+                    val w = r - l
                     if (h != lastLayoutH) {
                         lastLayoutH = h
-                        AppLog.write("URDF", "webview layout h=${h}px w=${r - l}px density=${resources.displayMetrics.density}")
+                        AppLog.write("URDF", "webview layout h=${h}px w=${w}px density=${resources.displayMetrics.density}")
+                        if (h > 20 && w > 20) {
+                            val density = resources.displayMetrics.density
+                            val cssHeightPx = (h / density).toInt().coerceAtLeast(1)
+                            val js = """(function(){
+                                var de = document.documentElement;
+                                if (de) de.style.height = '${cssHeightPx}px';
+                                if (document.body) document.body.style.height = '${cssHeightPx}px';
+                                var s = document.getElementById('stage');
+                                if (s) { s.style.position = 'absolute'; s.style.top = '0'; s.style.left = '0'; s.style.width = '100%'; s.style.height = '${cssHeightPx}px'; }
+                                if (window.RobonixRobotViewer) { window.RobonixRobotViewer.resize(); }
+                            })()"""
+                            evaluateJavascript(js, null)
+                        }
+                    }
+                }
+                webChromeClient = object : android.webkit.WebChromeClient() {
+                    override fun onConsoleMessage(cm: android.webkit.ConsoleMessage?): Boolean {
+                        if (cm != null) {
+                            AppLog.write("URDF-JS", "[${cm.messageLevel()}] ${cm.message()} (${cm.sourceId()}:${cm.lineNumber()})")
+                        }
+                        return true
                     }
                 }
                 webViewClient = object : WebViewClient() {
@@ -60,14 +91,35 @@ fun UrdfViewer(
                         request: WebResourceRequest,
                     ): WebResourceResponse? {
                         val url = request.url.toString()
+                        if (url == "${RobotVitalsRepository.ASSET_BASE_URL}robot_viewer.js" ||
+                            url.endsWith("/robot_viewer.js") ||
+                            url.contains("robot_viewer.js")
+                        ) {
+                            return try {
+                                val stream = view.context.assets.open("robot_viewer.js")
+                                WebResourceResponse("application/javascript", "utf-8", stream)
+                            } catch (e: Exception) {
+                                AppLog.write("URDF", "Failed to load robot_viewer.js from assets", e)
+                                null
+                            }
+                        }
                         if (!url.startsWith(RobotVitalsRepository.ASSET_BASE_URL)) return null
-                        val path = Uri.decode(url.removePrefix(RobotVitalsRepository.ASSET_BASE_URL))
-                        val bytes = assetProvider(path) ?: return null
+                        val rawPath = Uri.decode(url.removePrefix(RobotVitalsRepository.ASSET_BASE_URL))
+                        val cleanPath = rawPath.removePrefix("./").trim()
+                        val bytes = assetProvider(cleanPath)
+                            ?: assetProvider(cleanPath.substringAfter("package://").substringAfter("/"))
+                            ?: (if ("/" in cleanPath) {
+                                val filename = cleanPath.substringAfterLast("/")
+                                assetProvider(filename)
+                                    ?: assetProvider("meshes/stl/$filename")
+                                    ?: assetProvider("meshes/dae/$filename")
+                            } else null)
+                            ?: return null
                         val mime = when {
-                            path.endsWith(".stl", ignoreCase = true) -> "model/stl"
-                            path.endsWith(".dae", ignoreCase = true) -> "model/vnd.collada+xml"
-                            path.endsWith(".png", ignoreCase = true) -> "image/png"
-                            path.endsWith(".jpg", ignoreCase = true) || path.endsWith(".jpeg", ignoreCase = true) -> "image/jpeg"
+                            cleanPath.endsWith(".stl", ignoreCase = true) -> "model/stl"
+                            cleanPath.endsWith(".dae", ignoreCase = true) -> "model/vnd.collada+xml"
+                            cleanPath.endsWith(".png", ignoreCase = true) -> "image/png"
+                            cleanPath.endsWith(".jpg", ignoreCase = true) || cleanPath.endsWith(".jpeg", ignoreCase = true) -> "image/jpeg"
                             else -> "application/octet-stream"
                         }
                         return WebResourceResponse(mime, "utf-8", ByteArrayInputStream(bytes))
@@ -79,11 +131,6 @@ fun UrdfViewer(
                         state.latestRender?.let {
                             view.renderUrdf("onPageFinished", it)
                         }
-                        // This WebView reports a 0 CSS-px viewport height even
-                        // when laid out tall (percentage heights collapse), so
-                        // %-height html/body/#stage yield nothing. Inject an
-                        // explicit pixel height (physical px / density) on the
-                        // document and let the viewer resize onto it.
                         val density = view.resources.displayMetrics.density
                         val cssHeightPx = (view.height / density).toInt().coerceAtLeast(1)
                         view.postDelayed({
@@ -221,7 +268,7 @@ private const val VIEWER_HTML = """
 </head>
 <body>
   <div id="stage"></div>
-  <script src="file:///android_asset/robot_viewer.js"></script>
+  <script src="https://robonix.local/assets/robot_viewer.js"></script>
 </body>
 </html>
 """

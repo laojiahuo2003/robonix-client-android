@@ -29,29 +29,29 @@ import com.robonix.client.ui.audio.AudioScreen
 import com.robonix.client.ui.chat.ChatScreen
 import com.robonix.client.ui.chat.ChatViewModel
 import com.robonix.client.ui.chat.RtdlScreen
+import com.robonix.client.ui.components.PulsingStatusDot
 import com.robonix.client.ui.i18n.t
 import com.robonix.client.ui.i18n.tStatus
+import com.robonix.client.ui.perception.PerceptionScreen
 import com.robonix.client.ui.settings.SettingsScreen
 import com.robonix.client.ui.theme.*
 import com.robonix.client.ui.vitals.VitalsScreen
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextOverflow
 import kotlinx.coroutines.launch
 
 sealed class Screen(val route: String, val labelKey: String, val icon: ImageVector) {
     object Chat : Screen("chat", "nav.chat", Icons.Default.Chat)
+    object Perception : Screen("perception", "nav.perception", Icons.Default.Sensors)
     object Rtdl : Screen("rtdl", "nav.rtdl", Icons.Default.AccountTree)
     object Audio : Screen("audio", "nav.audio", Icons.Default.MusicNote)
     object Vitals : Screen("vitals", "nav.vitals", Icons.Default.MonitorHeart)
     object Settings : Screen("settings", "nav.settings", Icons.Default.Settings)
 }
 
-// NOTE: this list deliberately lives at top level (not in the sealed class's
-// companion). Building it during class initialization would deadlock-free-yet
-// produce a null element: referencing a nested `object` (e.g. Screen.Chat) to
-// initialize Screen itself, and the companion's listOf would read that object's
-// INSTANCE before its <clinit> finished — a class-init self-recursion. Being
-// lazy and top-level, the tabs only resolve after Screen is fully initialized.
+// Top-level lazy resolution avoids classloader cycle
 private val navScreens: List<Screen> by lazy {
-    listOf(Screen.Chat, Screen.Rtdl, Screen.Audio, Screen.Vitals, Screen.Settings)
+    listOf(Screen.Chat, Screen.Perception, Screen.Rtdl, Screen.Vitals, Screen.Settings)
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -95,10 +95,23 @@ fun AppNavigation() {
         topBar = {
             TopAppBar(
                 title = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(t("app.name"), fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                        Spacer(Modifier.width(12.dp))
-                        ConnectionChip(connectionState)
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(
+                            text = t("app.name"),
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.5.sp,
+                            color = Text,
+                            maxLines = 1,
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        ConnectionChip(
+                            state = connectionState,
+                            host = settings.cleanHost,
+                            modifier = Modifier.weight(1f, fill = false),
+                        )
                     }
                 },
                 // Session-sidebar launcher: only meaningful on the Chat tab.
@@ -194,6 +207,7 @@ fun AppNavigation() {
                     sessionDrawerState = sessionDrawerState,
                 )
             }
+            composable(Screen.Perception.route) { PerceptionScreen() }
             composable(Screen.Rtdl.route) { RtdlScreen() }
             composable(Screen.Audio.route) { AudioScreen() }
             composable(Screen.Vitals.route) { VitalsScreen() }
@@ -231,7 +245,11 @@ private fun NavigationTabIcon(
 }
 
 @Composable
-fun ConnectionChip(state: ConnectionState) {
+fun ConnectionChip(
+    state: ConnectionState,
+    host: String = "",
+    modifier: Modifier = Modifier,
+) {
     val color = when {
         state.isConnecting -> Amber
         state.isOnline -> Green
@@ -242,26 +260,54 @@ fun ConnectionChip(state: ConnectionState) {
         else -> tStatus(state.statusLabel)
     }
     Surface(
-        color = color.copy(alpha = 0.08f),
-        shape = RoundedCornerShape(16.dp),
+        color = color.copy(alpha = 0.12f),
+        shape = RoundedCornerShape(12.dp),
+        border = androidx.compose.foundation.BorderStroke(0.8.dp, color.copy(alpha = 0.4f)),
+        modifier = modifier.heightIn(min = 26.dp),
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Box(
-                modifier = Modifier
-                    .size(7.dp)
-                    .clip(CircleShape)
-                    .background(color),
-            )
-            Spacer(Modifier.width(6.dp))
+            if (state.isOnline) {
+                PulsingStatusDot(color = Green, size = 5.dp)
+            } else {
+                Box(
+                    modifier = Modifier
+                        .size(6.dp)
+                        .clip(CircleShape)
+                        .background(color),
+                )
+            }
+            Spacer(Modifier.width(5.dp))
             Text(
-                label,
+                text = label,
                 color = Text,
                 fontSize = 11.sp,
+                lineHeight = 14.sp,
                 fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                softWrap = false,
             )
+            if (state.isOnline && host.isNotBlank()) {
+                Box(
+                    modifier = Modifier
+                        .padding(horizontal = 5.dp)
+                        .size(3.dp)
+                        .clip(CircleShape)
+                        .background(Dim.copy(alpha = 0.6f)),
+                )
+                Text(
+                    text = host,
+                    color = Dim,
+                    fontSize = 10.sp,
+                    lineHeight = 13.sp,
+                    fontFamily = FontFamily.Monospace,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
     }
 }

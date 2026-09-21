@@ -63,20 +63,47 @@ class SharedViewModel @Inject constructor(
         viewModelScope.launch {
             settingsRepository.observeSettings().collect { s ->
                 val endpoint = s.atlasEndpoint
+                val endpointChanged = endpoint != lastChannelEndpoint
                 // Recycle channels to the previous robot when the endpoint
                 // changes mid-session; otherwise stale keep-alive channels to
                 // the old host linger and streams from it would be used.
-                if (endpoint != lastChannelEndpoint) {
+                if (endpointChanged) {
                     if (lastChannelEndpoint != null) channelProvider.shutdown()
                     lastChannelEndpoint = endpoint
                 }
                 _settings.value = s
-                if (!hasAutoConnected && endpoint.isNotBlank()) {
+                if (endpoint.isNotBlank() && (endpointChanged || !hasAutoConnected)) {
                     hasAutoConnected = true
                     connect()
                 }
             }
         }
+
+        // Automatic connection heartbeat (every 3.5s): keeps status live without manual refresh
+        viewModelScope.launch {
+            while (true) {
+                kotlinx.coroutines.delay(3500L)
+                val ep = _settings.value.atlasEndpoint
+                if (ep.isNotBlank()) {
+                    try {
+                        val snapshot = systemRepository.getSystemSnapshot(ep)
+                        _systemSnapshot.value = snapshot
+                        _connectionState.update {
+                            it.copy(
+                                isOnline = snapshot.error == null,
+                                statusLabel = snapshot.summary.state,
+                                lastError = snapshot.error,
+                            )
+                        }
+                    } catch (e: Exception) {
+                        _connectionState.update {
+                            it.copy(isOnline = false, statusLabel = "offline", lastError = e.message)
+                        }
+                    }
+                }
+            }
+        }
+
         // A new plan round arrived while the user is not on the RTDL tab → badge.
         viewModelScope.launch {
             var first = true

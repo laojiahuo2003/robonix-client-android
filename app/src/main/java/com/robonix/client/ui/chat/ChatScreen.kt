@@ -35,11 +35,16 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import com.robonix.client.data.local.Conversation
 import com.robonix.client.data.model.ChatMessage
 import com.robonix.client.data.model.MessageRole
+import com.robonix.client.ui.components.*
 import com.robonix.client.ui.i18n.t
 import com.robonix.client.ui.i18n.tStatus
 import com.robonix.client.ui.navigation.SharedViewModel
 import com.robonix.client.ui.settings.inputColors
 import com.robonix.client.ui.theme.*
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.border
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -65,10 +70,23 @@ fun ChatScreen(
         chatViewModel.updateSettings(settings)
     }
 
-    // Auto-scroll to bottom on new messages
-    LaunchedEffect(state.messages.size) {
+    // Auto-scroll to bottom on new messages OR streaming token generation
+    val isScrolledToBottom by remember {
+        derivedStateOf {
+            val totalItems = listState.layoutInfo.totalItemsCount
+            if (totalItems == 0) true
+            else {
+                val lastVisibleIndex = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+                lastVisibleIndex >= totalItems - 2
+            }
+        }
+    }
+
+    LaunchedEffect(state.messages.size, state.streamTokenCount) {
         if (state.messages.isNotEmpty()) {
-            listState.animateScrollToItem(state.messages.size - 1)
+            if (isScrolledToBottom) {
+                listState.animateScrollToItem(state.messages.size - 1)
+            }
         }
     }
 
@@ -232,37 +250,53 @@ fun ChatScreen(
                 }
             }
 
-            // Messages
-            LazyColumn(
+            // Messages list wrapped with floating scroll-to-bottom indicator
+            Box(
                 modifier = Modifier
                     .weight(1f)
-                    .fillMaxWidth()
-                    .padding(horizontal = 8.dp),
-                state = listState,
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-                contentPadding = PaddingValues(vertical = 8.dp),
+                    .fillMaxWidth(),
             ) {
-                if (state.messages.isEmpty()) {
-                    item {
-                        EmptyChatPlaceholder(
-                            isConnected = connectionState.isOnline,
-                            settings.atlasEndpoint,
-                        )
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 8.dp),
+                    state = listState,
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    contentPadding = PaddingValues(vertical = 8.dp),
+                ) {
+                    if (state.messages.isEmpty()) {
+                        item {
+                            EmptyChatPlaceholder(
+                                isConnected = connectionState.isOnline,
+                                settings.atlasEndpoint,
+                            )
+                        }
+                    }
+                    items(state.messages, key = { it.id }) { message ->
+                        val isStreamingThis = busyActive && message.id == state.activeAgentId
+                        MessageBubble(message, isStreaming = isStreamingThis)
+                    }
+                    // Processing indicator — spinner + live status + elapsed; disappears
+                    // with the turn (never persisted into history).
+                    if (busyActive && (state.activeAgentId == null || state.messages.none { it.id == state.activeAgentId })) {
+                        item {
+                            WorkingIndicator(
+                                liveStatus = state.liveStatus,
+                                elapsedSeconds = elapsedSeconds,
+                            )
+                        }
                     }
                 }
-                items(state.messages, key = { it.id }) { message ->
-                    MessageBubble(message)
-                }
-                // Processing indicator — spinner + live status + elapsed; disappears
-                // with the turn (never persisted into history).
-                if (busyActive) {
-                    item {
-                        WorkingIndicator(
-                            liveStatus = state.liveStatus,
-                            elapsedSeconds = elapsedSeconds,
-                        )
-                    }
-                }
+
+                // Floating "New messages below" pill when scrolled up
+                NewMessagesPill(
+                    visible = !isScrolledToBottom && state.messages.isNotEmpty(),
+                    onClick = {
+                        scope.launch {
+                            listState.animateScrollToItem(state.messages.size - 1)
+                        }
+                    },
+                )
             }
 
             // TTS speaking indicator — pulsing speaker while the robot talks
@@ -297,6 +331,7 @@ fun ChatScreen(
                     chatViewModel.startVoice(isSteer)
                 },
                 onVoiceStop = { chatViewModel.onMicReleased() },
+                onVoiceForceStop = { chatViewModel.stopVoiceSession() },
                 isBusy = state.isBusy,
                 isRecording = state.isRecording,
                 isProcessing = chatViewModel.isVoiceProcessing,
@@ -349,6 +384,39 @@ fun ChatScreen(
             },
             containerColor = Panel,
         )
+    }
+}
+
+/** Floating "New messages below" pill overlay, anchored to the bottom of the chat list. */
+@Composable
+private fun BoxScope.NewMessagesPill(
+    visible: Boolean,
+    onClick: () -> Unit,
+) {
+    AnimatedVisibility(
+        visible = visible,
+        enter = fadeIn() + slideInVertically { it / 2 },
+        exit = fadeOut() + slideOutVertically { it / 2 },
+        modifier = Modifier
+            .align(Alignment.BottomCenter)
+            .padding(bottom = 12.dp),
+    ) {
+        Surface(
+            onClick = onClick,
+            color = Panel2.copy(alpha = 0.95f),
+            shape = RoundedCornerShape(20.dp),
+            border = BorderStroke(1.dp, Cyan.copy(alpha = 0.5f)),
+            shadowElevation = 8.dp,
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Icons.Default.KeyboardArrowDown, null, tint = Cyan, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(4.dp))
+                Text(t("chat.new.messages"), color = Text, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+            }
+        }
     }
 }
 
@@ -538,16 +606,61 @@ private fun TtsPulseIcon() {
     )
 }
 
+private data class MessageContentPart(val isCode: Boolean, val content: String, val language: String = "")
+
+private fun parseMessageContent(raw: String): List<MessageContentPart> {
+    if (!raw.contains("```")) {
+        return listOf(MessageContentPart(isCode = false, content = raw))
+    }
+    val parts = mutableListOf<MessageContentPart>()
+    val tokens = raw.split("```")
+    for (i in tokens.indices) {
+        val segment = tokens[i]
+        if (i % 2 == 1) {
+            val lines = segment.lines()
+            val lang = lines.firstOrNull()?.trim() ?: ""
+            val codeBody = if (lines.size > 1) segment.substringAfter("\n").trimEnd() else segment.trim()
+            parts.add(MessageContentPart(isCode = true, content = codeBody, language = lang))
+        } else {
+            if (segment.isNotEmpty()) {
+                parts.add(MessageContentPart(isCode = false, content = segment))
+            }
+        }
+    }
+    return parts
+}
+
 @Composable
-fun MessageBubble(message: ChatMessage) {
+fun MessageBubble(message: ChatMessage, isStreaming: Boolean = false) {
     val bgColor: androidx.compose.ui.graphics.Color
+    val borderColor: androidx.compose.ui.graphics.Color
     val maxWidthFraction: Float
     val horizontalArrangement: Arrangement.Horizontal
     when (message.role) {
-        MessageRole.User -> { bgColor = UserBg; maxWidthFraction = 0.85f; horizontalArrangement = Arrangement.End }
-        MessageRole.Agent -> { bgColor = AgentBg; maxWidthFraction = 0.92f; horizontalArrangement = Arrangement.Start }
-        MessageRole.Error -> { bgColor = Red.copy(alpha = 0.10f); maxWidthFraction = 0.95f; horizontalArrangement = Arrangement.Center }
-        MessageRole.Status -> { bgColor = Panel2.copy(alpha = 0.5f); maxWidthFraction = 0.95f; horizontalArrangement = Arrangement.Center }
+        MessageRole.User -> {
+            bgColor = UserBg
+            borderColor = UserBorder
+            maxWidthFraction = 0.85f
+            horizontalArrangement = Arrangement.End
+        }
+        MessageRole.Agent -> {
+            bgColor = AgentBg
+            borderColor = if (isStreaming) Cyan.copy(alpha = 0.4f) else AgentBorder
+            maxWidthFraction = 0.92f
+            horizontalArrangement = Arrangement.Start
+        }
+        MessageRole.Error -> {
+            bgColor = Red.copy(alpha = 0.10f)
+            borderColor = Red.copy(alpha = 0.3f)
+            maxWidthFraction = 0.95f
+            horizontalArrangement = Arrangement.Center
+        }
+        MessageRole.Status -> {
+            bgColor = Panel2.copy(alpha = 0.5f)
+            borderColor = Line
+            maxWidthFraction = 0.95f
+            horizontalArrangement = Arrangement.Center
+        }
     }
 
     Row(
@@ -558,34 +671,63 @@ fun MessageBubble(message: ChatMessage) {
             modifier = Modifier
                 .fillMaxWidth(maxWidthFraction)
                 .padding(horizontal = 4.dp)
-                .clip(RoundedCornerShape(10.dp))
+                .clip(RoundedCornerShape(12.dp))
                 .background(bgColor)
-                .padding(horizontal = 12.dp, vertical = 8.dp),
+                .border(1.dp, borderColor, RoundedCornerShape(12.dp))
+                .padding(horizontal = 12.dp, vertical = 9.dp),
         ) {
-            if (message.meta.isNotBlank()) {
-                Text(
-                    message.meta.uppercase(),
-                    color = if (message.role == MessageRole.User) Blue
-                    else if (message.role == MessageRole.Agent) Green
-                    else Muted,
-                    fontSize = 9.sp,
-                    fontWeight = FontWeight.ExtraBold,
-                    letterSpacing = 0.5.sp,
-                )
-                Spacer(Modifier.height(2.dp))
+            if (message.meta.isNotBlank() || isStreaming) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (isStreaming) {
+                        PulsingStatusDot(color = Cyan, size = 6.dp)
+                        Spacer(Modifier.width(6.dp))
+                    }
+                    Text(
+                        (if (message.meta.isNotBlank()) message.meta else "ROBONIX").uppercase(),
+                        color = if (message.role == MessageRole.User) Blue
+                        else if (message.role == MessageRole.Agent) Cyan
+                        else Muted,
+                        fontSize = 9.sp,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.ExtraBold,
+                        letterSpacing = 0.5.sp,
+                    )
+                }
+                Spacer(Modifier.height(3.dp))
             }
-            Text(
-                message.text,
-                color = Text,
-                fontSize = 13.sp,
-                lineHeight = 19.sp,
-            )
+
+            val parts = remember(message.text) { parseMessageContent(message.text) }
+            parts.forEach { part ->
+                if (part.isCode) {
+                    Spacer(Modifier.height(4.dp))
+                    CodeBlockView(code = part.content, language = part.language)
+                    Spacer(Modifier.height(4.dp))
+                } else {
+                    Text(
+                        part.content,
+                        color = Text,
+                        fontSize = 13.5.sp,
+                        lineHeight = 19.sp,
+                    )
+                }
+            }
+
+            if (isStreaming) {
+                Text(
+                    " ▊",
+                    color = Cyan,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+
             if (message.timestamp > 0) {
-                Spacer(Modifier.height(2.dp))
+                Spacer(Modifier.height(3.dp))
                 Text(
                     SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(message.timestamp)),
                     color = Dim,
                     fontSize = 9.sp,
+                    fontFamily = FontFamily.Monospace,
                 )
             }
         }
@@ -606,37 +748,80 @@ fun ComposerBar(
     isProcessing: Boolean = false,
     characterLimit: Int = 2000,
 ) {
+    val haptic = LocalHapticFeedback.current
+    var held by remember { mutableStateOf(false) }
+    var dragOffsetX by remember { mutableFloatStateOf(0f) }
+    val isCancelZone = dragOffsetX < -160f
+
     Surface(
         color = Panel,
         shadowElevation = 8.dp,
+        border = BorderStroke(1.dp, LineSoft),
     ) {
         Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
+            // Live waveform indicator when recording or holding
+            if (held || isRecording) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 6.dp, vertical = 3.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    AudioWaveformVisualizer(
+                        modifier = Modifier.weight(1f),
+                        active = true,
+                        color = if (isCancelZone) Red else Cyan,
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = if (isCancelZone) t("composer.release.cancel") else t("composer.slide.cancel"),
+                        color = if (isCancelZone) Red else Muted,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+            }
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.Bottom,
             ) {
-                // Voice button — press-and-hold to talk
-                var held by remember { mutableStateOf(false) }
+                // Voice button — press-and-hold to talk with slide-to-cancel
                 Box(
                     modifier = Modifier
                         .size(48.dp)
                         .pointerInput(Unit) {
                             awaitPointerEventScope {
                                 while (true) {
-                                    // Wait for a finger-down in the Initial pass so we
-                                    // intercept before any parent (LazyColumn, etc.)
                                     val event = awaitPointerEvent(PointerEventPass.Initial)
                                     val pressed = event.changes.any { it.pressed }
                                     if (pressed && !held) {
                                         event.changes.forEach { it.consume() }
                                         held = true
+                                        dragOffsetX = 0f
+                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                                         onVoiceStart()
+                                    }
+                                    if (held) {
+                                        val change = event.changes.firstOrNull()
+                                        if (change != null && change.pressed) {
+                                            val deltaX = change.position.x - change.previousPosition.x
+                                            dragOffsetX += deltaX
+                                            if (dragOffsetX > 0f) dragOffsetX = 0f
+                                        }
                                     }
                                     val released = event.changes.any { !it.pressed && it.previousPressed }
                                     if (released && held) {
                                         event.changes.forEach { if (!it.pressed) it.consume() }
+                                        val cancelled = dragOffsetX < -160f
                                         held = false
-                                        onVoiceStop()
+                                        dragOffsetX = 0f
+                                        if (cancelled) {
+                                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                            onVoiceForceStop()
+                                        } else {
+                                            onVoiceStop()
+                                        }
                                     }
                                 }
                             }
@@ -647,7 +832,7 @@ fun ComposerBar(
                         Icons.Default.Mic,
                         contentDescription = t("composer.voice"),
                         tint = when {
-                            held || isRecording -> Red
+                            held || isRecording -> if (isCancelZone) Red else NeonAmber
                             isProcessing -> Amber
                             else -> Muted
                         },

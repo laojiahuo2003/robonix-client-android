@@ -21,6 +21,7 @@ object AppStrings {
         // navigation / common actions
         "app.name" to "Robonix Client",
         "nav.chat" to "Chat",
+        "nav.perception" to "Perception",
         "nav.rtdl" to "RTDL",
         "nav.audio" to "Audio",
         "nav.settings" to "Settings",
@@ -143,6 +144,9 @@ object AppStrings {
         "settings.record" to "Voice clip length",
         "settings.record.desc" to "Hold-to-talk auto-stops after this length",
         "settings.record.value" to "{0}s",
+        "settings.tab.network" to "Connection",
+        "settings.tab.audio" to "Audio & Voice",
+        "settings.tab.system" to "System & Nodes",
 
         // snackbar / misc messages
         "msg.settings.saved" to "Settings saved",
@@ -265,12 +269,40 @@ object AppStrings {
         "status.UNKNOWN" to "Unknown",
         "status.WARN" to "Warn",
         "status.STALE" to "Stale",
+
+        // perception
+        "perception.title" to "Robonix Perception Matrix",
+        "perception.subtitle" to "4-Channel Realtime Spatial Telemetry",
+        "perception.tab.all" to "Matrix",
+        "perception.tab.camera" to "RGB Camera",
+        "perception.tab.depth" to "Depth Heatmap",
+        "perception.tab.lidar" to "2D LiDAR",
+        "perception.tab.map" to "Grid Map",
+        "perception.snapshot" to "Snapshot",
+        "perception.snapshot.saved" to "Snapshot saved to gallery",
+        "perception.depth.probe" to "Distance: {0} m",
+        "perception.depth.hint" to "Tap heatmap to probe distance",
+        "perception.lidar.range" to "Range: {0} m",
+        "perception.fps" to "{0} FPS",
+        "perception.stream.standby" to "Standby · Awaiting Stream",
+
+        // chat extensions
+        "chat.new.messages" to "New messages below",
+        "chat.copy.code" to "Copy Code",
+        "chat.code.copied" to "Copied to clipboard",
+        "composer.slide.cancel" to "‹ Slide left to cancel",
+        "composer.release.cancel" to "Release to cancel",
+        "vitals.3d.expand" to "Expand 3D Model",
+        "vitals.3d.collapse" to "Collapse 3D Model",
+        "hud.latency" to "{0} ms",
+        "hud.host" to "Host: {0}",
     )
 
     private val zh: Map<String, String> = mapOf(
         // navigation / common actions
         "app.name" to "Robonix 客户端",
         "nav.chat" to "对话",
+        "nav.perception" to "感知",
         "nav.rtdl" to "RTDL",
         "nav.audio" to "音频",
         "nav.settings" to "设置",
@@ -393,6 +425,9 @@ object AppStrings {
         "settings.record" to "语音片段时长",
         "settings.record.desc" to "按住说话达到该时长后自动结束",
         "settings.record.value" to "{0} 秒",
+        "settings.tab.network" to "连接网络",
+        "settings.tab.audio" to "音频语音",
+        "settings.tab.system" to "系统契约",
 
         // snackbar / misc messages
         "msg.settings.saved" to "设置已保存",
@@ -515,6 +550,33 @@ object AppStrings {
         "status.UNKNOWN" to "未知",
         "status.WARN" to "警告",
         "status.STALE" to "过期",
+
+        // perception
+        "perception.title" to "Robonix 空间感知矩阵",
+        "perception.subtitle" to "四通道多维机器人空间感知中枢",
+        "perception.tab.all" to "全局矩阵",
+        "perception.tab.camera" to "高清视觉",
+        "perception.tab.depth" to "深度热力",
+        "perception.tab.lidar" to "激光雷达",
+        "perception.tab.map" to "占据地图",
+        "perception.snapshot" to "快照",
+        "perception.snapshot.saved" to "感知快照已保存",
+        "perception.depth.probe" to "探测物距：{0} 米",
+        "perception.depth.hint" to "轻触深度图任意区域探测物距",
+        "perception.lidar.range" to "探测半径：{0} 米",
+        "perception.fps" to "{0} 帧/秒",
+        "perception.stream.standby" to "待机 · 等待流接入",
+
+        // chat extensions
+        "chat.new.messages" to "下方有新消息",
+        "chat.copy.code" to "复制代码",
+        "chat.code.copied" to "已复制到剪贴板",
+        "composer.slide.cancel" to "‹ 向左滑动取消",
+        "composer.release.cancel" to "松开手指取消",
+        "vitals.3d.expand" to "展开 3D 数字孪生",
+        "vitals.3d.collapse" to "收起 3D 数字孪生",
+        "hud.latency" to "{0} 毫秒",
+        "hud.host" to "目标：{0}",
     )
 
     private val dictionaries = mapOf(ZH to zh, EN to en)

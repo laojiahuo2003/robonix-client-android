@@ -39,7 +39,7 @@ class ConversationStore @Inject constructor(
             if (!file.exists()) return@withContext emptyList()
             val raw = file.readText()
             val arr = JSONArray(raw)
-            (0 until arr.length()).map { i ->
+            val list = (0 until arr.length()).map { i ->
                 val obj = arr.getJSONObject(i)
                 Conversation(
                     id = obj.optString("id", ""),
@@ -52,7 +52,9 @@ class ConversationStore @Inject constructor(
                     batchesJson = obj.optString("batches", "[]"),
                     nodeStatesJson = obj.optString("nodeStates", "{}"),
                 )
-            }
+            }.filter { it.id.isNotBlank() }
+            .sortedByDescending { it.updatedAt }
+            list
         } catch (e: Exception) {
             AppLog.write("CONV", "Failed to load conversations: ${e.message}", e)
             emptyList()

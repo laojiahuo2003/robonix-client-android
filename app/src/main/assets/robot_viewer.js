@@ -35314,7 +35314,9 @@ No loader available`);
       const loader = new URDFLoader_default(manager);
       const robot = loader.parse(urdfXml, workingPath);
       if (assetsStarted) await assetsReady;
-      if (failedAssets.length) throw new Error("failed to load " + failedAssets.length + " URDF asset(s)");
+      if (failedAssets.length) {
+        console.warn("URDF loaded with " + failedAssets.length + " missing asset(s):", failedAssets);
+      }
       return robot;
     }
     async render(payload) {

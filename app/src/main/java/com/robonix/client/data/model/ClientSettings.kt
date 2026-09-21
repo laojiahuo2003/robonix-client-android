@@ -16,9 +16,16 @@ data class ClientSettings(
     val asrNodeId: String = "",
     val voiceprintNodeId: String = "",
 ) {
+    val cleanHost: String
+        get() = robotHost.trim()
+            .removePrefix("http://")
+            .removePrefix("https://")
+            .substringBefore(":")
+            .trimEnd('/')
+
     val atlasEndpoint: String
-        get() = if (robotHost.isNotBlank()) "$robotHost:$atlasPort" else ""
+        get() = if (cleanHost.isNotBlank()) "$cleanHost:$atlasPort" else ""
 
     val isConfigured: Boolean
-        get() = robotHost.isNotBlank() && atlasPort > 0
+        get() = cleanHost.isNotBlank() && atlasPort > 0
 }

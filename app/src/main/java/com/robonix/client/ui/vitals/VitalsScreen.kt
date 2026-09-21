@@ -20,6 +20,9 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.animation.*
+import androidx.compose.foundation.BorderStroke
+import com.robonix.client.ui.components.CyberCard
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -101,7 +104,7 @@ class VitalsViewModel @Inject constructor(
                 try {
                     robotVitalsRepository.streamVitalsSnapshots(target).collect { snapshot ->
                         lastSnapshot = snapshot
-                        val description = _uiState.value.description ?: return@collect
+                        val description = _uiState.value.description ?: RobotVitalsMapper.fallbackRobotDescription()
                         val hardware = RobotVitalsMapper.snapshotToHardware(snapshot, description)
                         _uiState.update { it.copy(hardware = hardware, hardwareError = null, loaded = true) }
                     }
@@ -197,44 +200,75 @@ fun VitalsScreen(
         onDispose { viewModel.stop() }
     }
 
-    val description = state.description
+    val rawDescription = state.description
+    val description = rawDescription ?: RobotVitalsMapper.fallbackRobotDescription()
     val hardware = state.hardware
     val highlights = remember(hardware) {
         hardware?.componentHealth?.associate { it.componentId to it.visualState } ?: emptyMap()
     }
+
+    var isViewerExpanded by rememberSaveable { mutableStateOf(true) }
 
     Column(modifier = Modifier.fillMaxSize()) {
         state.descriptionError?.let { ErrorBanner(it) }
         state.hardwareError?.let { ErrorBanner(it) }
         state.moduleError?.let { ErrorBanner(it) }
 
-        if (description != null) {
+        Surface(
+            color = Panel2,
+            shape = RoundedCornerShape(8.dp),
+            border = BorderStroke(1.dp, Line),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp, vertical = 4.dp),
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { isViewerExpanded = !isViewerExpanded }
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.ViewInAr, null, tint = Cyan, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        description.displayName.ifBlank { "3D DIGITAL TWIN" },
+                        color = Text,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+                Icon(
+                    imageVector = if (isViewerExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                    contentDescription = if (isViewerExpanded) "Collapse" else "Expand",
+                    tint = Cyan,
+                    modifier = Modifier.size(20.dp),
+                )
+            }
+        }
+
+        if (isViewerExpanded) {
             UrdfViewer(
                 description = description,
                 highlights = highlights,
                 assetProvider = viewModel::assetForPath,
-                modifier = Modifier.fillMaxWidth().height(300.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(260.dp)
+                    .padding(horizontal = 8.dp, vertical = 2.dp)
+                    .clip(RoundedCornerShape(8.dp)),
             )
         }
 
-        if (description == null && state.loaded) {
-            Column(
-                modifier = Modifier.fillMaxWidth().weight(1f).padding(48.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                Icon(Icons.Default.MonitorHeart, null, tint = Dim, modifier = Modifier.size(48.dp))
-                Spacer(Modifier.height(12.dp))
-                Text(t("vitals.empty"), color = Muted, fontSize = 13.sp)
-            }
-        } else {
-            VitalsBody(
-                description = description,
-                hardware = hardware,
-                modules = state.modules,
-                providers = state.providers,
-                viewModel = viewModel,
-            )
-        }
+        VitalsBody(
+            description = rawDescription,
+            hardware = hardware,
+            modules = state.modules,
+            providers = state.providers,
+            viewModel = viewModel,
+        )
     }
 
     state.selected?.let { module ->
@@ -284,13 +318,13 @@ private fun ErrorBanner(message: String) {
 
 @Composable
 private fun SummaryCard(description: RobotDescription?, hardware: HardwareSnapshot?) {
-    Surface(color = Panel, shape = RoundedCornerShape(10.dp), modifier = Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(12.dp)) {
+    CyberCard(modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 val overall = worstState(hardware?.componentHealth?.map { it.health }.orEmpty())
                 Icon(
                     Icons.Default.MonitorHeart, null,
-                    tint = stateColor(overall), modifier = Modifier.size(16.dp),
+                    tint = stateColor(overall), modifier = Modifier.size(18.dp),
                 )
                 Spacer(Modifier.width(8.dp))
                 Text(
@@ -302,13 +336,51 @@ private fun SummaryCard(description: RobotDescription?, hardware: HardwareSnapsh
                 Spacer(Modifier.weight(1f))
             }
             hardware?.power?.let { power ->
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(10.dp))
+                val soc = power.socPercent.coerceIn(0f, 100f)
+                val batteryColor = when {
+                    soc > 40 -> Green
+                    soc > 20 -> Amber
+                    else -> Red
+                }
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Default.BatteryChargingFull, null, tint = Cyan, modifier = Modifier.size(14.dp))
+                    Icon(
+                        if (power.charging) Icons.Default.BatteryChargingFull else Icons.Default.BatteryStd,
+                        null,
+                        tint = batteryColor,
+                        modifier = Modifier.size(16.dp),
+                    )
                     Spacer(Modifier.width(6.dp))
                     Text(
-                        "${power.socPercent}%  ${power.voltage}V${if (power.charging) " · " + t("vitals.charging") else ""}",
-                        color = Muted, fontSize = 12.sp,
+                        "${power.socPercent}%",
+                        color = batteryColor,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        "${power.voltage}V${if (power.charging) " · " + t("vitals.charging") else ""}",
+                        color = Muted,
+                        fontSize = 12.sp,
+                    )
+                }
+                Spacer(Modifier.height(4.dp))
+                // Custom determinate bar: Material3 LinearProgressIndicator triggers
+                // NoSuchMethodError on this device (see RtdlScreen note), so draw it
+                // with plain Boxes instead.
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(4.dp)
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(Line),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(soc / 100f)
+                            .height(4.dp)
+                            .clip(RoundedCornerShape(2.dp))
+                            .background(batteryColor),
                     )
                 }
             }
@@ -354,11 +426,20 @@ private fun TreeNodeRow(node: TreeNode, healthById: Map<String, ComponentHealthR
 
 @Composable
 private fun SignalsCard(hardware: HardwareSnapshot) {
-    Surface(color = Panel, shape = RoundedCornerShape(10.dp), modifier = Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(12.dp)) {
+    CyberCard(modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(14.dp)) {
             Text(t("vitals.signals"), color = Text, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(6.dp))
+            Spacer(Modifier.height(8.dp))
             hardware.signals.forEach { signal ->
+                val isTemp = signal.key.contains("temp", ignoreCase = true)
+                val valColor = if (isTemp) {
+                    when {
+                        signal.observedValue >= 80f -> Red
+                        signal.observedValue >= 65f -> Amber
+                        else -> Text
+                    }
+                } else Text
+
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -369,8 +450,8 @@ private fun SignalsCard(hardware: HardwareSnapshot) {
                     )
                     Spacer(Modifier.width(8.dp))
                     Text(
-                        formatValue(signal.observedValue),
-                        color = Text, fontSize = 11.sp,
+                        formatValue(signal.observedValue) + if (isTemp) "°C" else "",
+                        color = valColor, fontSize = 11.5.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.SemiBold,
                     )
                     Spacer(Modifier.width(8.dp))
                     Text(tStatus(signal.visualState), color = stateColor(signal.visualState), fontSize = 10.sp, fontWeight = FontWeight.Bold)

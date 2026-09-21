@@ -30,3 +30,22 @@ val AgentBorder = Color(0xFF274540)
 val RunningBg = Color(0xFFF1BA4F).copy(alpha = 0.07f)
 val FailedBg = Color(0xFFF06758).copy(alpha = 0.07f)
 val SuccessBg = Color(0xFF6FD17D).copy(alpha = 0.055f)
+
+// Cybernetic HUD & Neon accents
+val NeonCyan = Color(0xFF00F0FF)
+val NeonAmber = Color(0xFFFFB020)
+val NeonGreen = Color(0xFF10B981)
+val NeonPurple = Color(0xFF8B5CF6)
+val CyberCardBg = Color(0xF20F1B22)
+val CyberCardBorder = Color(0x3D5FCDD8)
+val CyberGlow = Color(0x2600F0FF)
+val HudBracket = Color(0x995FCDD8)
+
+// Radar & Perception visualizer palette
+val RadarGreen = Color(0xFF00E676)
+val RadarGrid = Color(0x2600E676)
+val RadarSweep = Color(0x4000E676)
+val RadarBlip = Color(0xFF76FF03)
+val DepthCool = Color(0xFF2563EB)
+val DepthWarm = Color(0xFFEF4444)
+
