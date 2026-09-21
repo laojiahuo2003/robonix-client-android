@@ -210,9 +210,11 @@ fun VitalsScreen(
     var isViewerExpanded by rememberSaveable { mutableStateOf(true) }
 
     Column(modifier = Modifier.fillMaxSize()) {
-        state.descriptionError?.let { ErrorBanner(it) }
-        state.hardwareError?.let { ErrorBanner(it) }
-        state.moduleError?.let { ErrorBanner(it) }
+        VitalsErrorSection(
+            descriptionError = state.descriptionError,
+            hardwareError = state.hardwareError,
+            moduleError = state.moduleError,
+        )
 
         Surface(
             color = Panel2,
@@ -300,6 +302,45 @@ private fun VitalsBody(
         }
         item { Spacer(Modifier.height(32.dp)) }
     }
+}
+
+@Composable
+private fun VitalsErrorSection(
+    descriptionError: String?,
+    hardwareError: String?,
+    moduleError: String?,
+) {
+    val rawErrors = listOfNotNull(descriptionError, hardwareError, moduleError)
+        .map { it.trim() }
+        .filter { it.isNotBlank() }
+    if (rawErrors.isEmpty()) return
+
+    // If any error indicates connection failure / UNAVAILABLE, show one clean unified banner
+    val isConnectionFailure = rawErrors.any { error ->
+        error.contains("UNAVAILABLE", ignoreCase = true) ||
+        error.contains("ConnectException", ignoreCase = true) ||
+        error.contains("Failed to connect", ignoreCase = true) ||
+        error.contains("Channel shutdown", ignoreCase = true) ||
+        (error.contains("UNKNOWN", ignoreCase = true) && error.contains("connect", ignoreCase = true))
+    }
+
+    if (isConnectionFailure) {
+        ErrorBanner(t("vitals.error.unavailable"))
+    } else {
+        // Deduplicate and strip raw gRPC stack prefixes
+        rawErrors
+            .map { cleanErrorMessage(it) }
+            .distinct()
+            .forEach { ErrorBanner(it) }
+    }
+}
+
+private fun cleanErrorMessage(raw: String): String {
+    var msg = raw.trim()
+    if (msg.startsWith("io.grpc.StatusRuntimeException:")) {
+        msg = msg.substringAfter("io.grpc.StatusRuntimeException:").trim()
+    }
+    return msg
 }
 
 @Composable

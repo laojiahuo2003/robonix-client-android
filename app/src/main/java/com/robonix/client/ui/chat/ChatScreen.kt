@@ -82,11 +82,24 @@ fun ChatScreen(
         }
     }
 
-    LaunchedEffect(state.messages.size, state.streamTokenCount) {
+    // Always auto-scroll to bottom when a new message arrives (from user or assistant)
+    LaunchedEffect(state.messages.size) {
         if (state.messages.isNotEmpty()) {
-            if (isScrolledToBottom) {
-                listState.animateScrollToItem(state.messages.size - 1)
-            }
+            listState.animateScrollToItem(state.messages.size - 1)
+        }
+    }
+
+    // While streaming tokens, keep scrolled to bottom if user is already at the bottom
+    LaunchedEffect(state.streamTokenCount) {
+        if (state.messages.isNotEmpty() && isScrolledToBottom) {
+            listState.scrollToItem(state.messages.size - 1)
+        }
+    }
+
+    // Scroll to bottom when switching session
+    LaunchedEffect(state.sessionId) {
+        if (state.messages.isNotEmpty()) {
+            listState.scrollToItem(state.messages.size - 1)
         }
     }
 
@@ -750,8 +763,8 @@ fun ComposerBar(
 ) {
     val haptic = LocalHapticFeedback.current
     var held by remember { mutableStateOf(false) }
-    var dragOffsetX by remember { mutableFloatStateOf(0f) }
-    val isCancelZone = dragOffsetX < -160f
+    var dragOffsetY by remember { mutableFloatStateOf(0f) }
+    val isCancelZone = dragOffsetY < -120f
 
     Surface(
         color = Panel,
@@ -786,7 +799,7 @@ fun ComposerBar(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.Bottom,
             ) {
-                // Voice button — press-and-hold to talk with slide-to-cancel
+                // Voice button — press-and-hold to talk with slide-to-cancel (slide up)
                 Box(
                     modifier = Modifier
                         .size(48.dp)
@@ -798,24 +811,24 @@ fun ComposerBar(
                                     if (pressed && !held) {
                                         event.changes.forEach { it.consume() }
                                         held = true
-                                        dragOffsetX = 0f
+                                        dragOffsetY = 0f
                                         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                                         onVoiceStart()
                                     }
                                     if (held) {
                                         val change = event.changes.firstOrNull()
                                         if (change != null && change.pressed) {
-                                            val deltaX = change.position.x - change.previousPosition.x
-                                            dragOffsetX += deltaX
-                                            if (dragOffsetX > 0f) dragOffsetX = 0f
+                                            val deltaY = change.position.y - change.previousPosition.y
+                                            dragOffsetY += deltaY
+                                            if (dragOffsetY > 0f) dragOffsetY = 0f
                                         }
                                     }
                                     val released = event.changes.any { !it.pressed && it.previousPressed }
                                     if (released && held) {
                                         event.changes.forEach { if (!it.pressed) it.consume() }
-                                        val cancelled = dragOffsetX < -160f
+                                        val cancelled = dragOffsetY < -120f
                                         held = false
-                                        dragOffsetX = 0f
+                                        dragOffsetY = 0f
                                         if (cancelled) {
                                             haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                                             onVoiceForceStop()
