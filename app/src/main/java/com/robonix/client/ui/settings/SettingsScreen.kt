@@ -428,12 +428,12 @@ private fun CompactTextField(
 @Composable
 private fun PillButton(
     text: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
     icon: ImageVector? = null,
     color: Color = Cyan,
     enabled: Boolean = true,
     filled: Boolean = true,
-    modifier: Modifier = Modifier,
-    onClick: () -> Unit,
 ) {
     if (filled) {
         Button(

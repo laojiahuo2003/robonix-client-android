@@ -247,8 +247,8 @@ private fun NavigationTabIcon(
 @Composable
 fun ConnectionChip(
     state: ConnectionState,
-    host: String = "",
     modifier: Modifier = Modifier,
+    host: String = "",
 ) {
     val color = when {
         state.isConnecting -> Amber

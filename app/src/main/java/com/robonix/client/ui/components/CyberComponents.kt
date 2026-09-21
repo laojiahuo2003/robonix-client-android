@@ -187,8 +187,8 @@ fun AudioWaveformVisualizer(
 @Composable
 fun CodeBlockView(
     code: String,
-    language: String = "",
     modifier: Modifier = Modifier,
+    language: String = "",
 ) {
     val context = LocalContext.current
     val scrollState = rememberScrollState()
@@ -270,8 +270,8 @@ fun CodeBlockView(
 fun TelemetryChip(
     label: String,
     value: String,
-    accentColor: Color = Cyan,
     modifier: Modifier = Modifier,
+    accentColor: Color = Cyan,
 ) {
     Surface(
         modifier = modifier,

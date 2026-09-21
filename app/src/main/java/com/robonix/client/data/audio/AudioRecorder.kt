@@ -1,6 +1,7 @@
 package com.robonix.client.data.audio
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
 import android.media.AudioFormat
@@ -33,7 +34,12 @@ class AudioRecorder @Inject constructor(
         AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat) * 2
     }
 
+    @SuppressLint("MissingPermission")
     fun startRecording(): Flow<ByteArray> = callbackFlow {
+        if (!hasPermission()) {
+            close(SecurityException("RECORD_AUDIO permission not granted"))
+            return@callbackFlow
+        }
         if (isRecording) {
             close(IllegalStateException("Already recording"))
             return@callbackFlow
@@ -85,6 +91,7 @@ class AudioRecorder @Inject constructor(
         audioRecord = null
     }
 
+    @SuppressLint("MissingPermission")
     suspend fun recordForDuration(seconds: Float): ByteArray = withContext(Dispatchers.IO) {
         if (!hasPermission()) throw SecurityException("RECORD_AUDIO permission not granted")
 
