@@ -89,6 +89,13 @@ object RobotVitalsMapper {
         fun providerIds(exports: Any?): List<String> =
             asList(exports).mapNotNull { exp -> str(asMap(exp)["provider_id"]).ifBlank { null } }
 
+        fun capabilityPaths(exports: Any?): List<String> =
+            asList(exports).flatMap { exp ->
+                asList(asMap(exp)["capabilities"]).mapNotNull { cap ->
+                    str(asMap(cap)["path"]).ifBlank { null }
+                }
+            }
+
         val components = mutableListOf<RobotComponent>()
         components.add(
             RobotComponent(
@@ -99,6 +106,7 @@ object RobotVitalsMapper {
                 type = "robot",
                 urdfLink = str(urdf["root_link"]),
                 providers = providerIds(robot["exports"]),
+                capabilities = capabilityPaths(robot["exports"]),
             ),
         )
 
@@ -119,6 +127,7 @@ object RobotVitalsMapper {
                         urdfLink = str(component["urdf_link"]),
                         urdfJoint = str(component["urdf_joint"]),
                         providers = providerIds(component["exports"]),
+                        capabilities = capabilityPaths(component["exports"]),
                     ),
                 )
                 appendComponents(component["components"], componentId)

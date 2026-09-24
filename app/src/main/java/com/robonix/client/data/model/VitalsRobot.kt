@@ -19,6 +19,7 @@ data class RobotComponent(
     val urdfLink: String = "",
     val urdfJoint: String = "",
     val providers: List<String> = emptyList(),
+    val capabilities: List<String> = emptyList(),
 )
 
 data class RobotDimensions(

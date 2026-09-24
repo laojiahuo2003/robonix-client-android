@@ -77,17 +77,18 @@ class PerceptionRepository @Inject constructor(
     private val atlasClient: AtlasClient,
 ) {
     companion object {
-        const val CONTRACT_CAMERA_RGB = "robonix/primitive/camera/snapshot"
-        const val CONTRACT_CAMERA_DEPTH = "robonix/primitive/camera/depth_snapshot"
-        const val CONTRACT_LIDAR = "robonix/primitive/lidar/snapshot"
-        const val CONTRACT_SCENE_ROBOT = "robonix/system/scene/get_robot_context"
-        const val CONTRACT_SCENE_OBJECTS = "robonix/system/scene/list_objects"
-        const val CONTRACT_SCENE_REGIONS = "robonix/system/scene/list_regions"
-
         private const val MCP_PROTOCOL_VERSION = "2024-11-05"
         private const val MAP_UI_PORT = 50107
+        private const val MAPPING_PORT = 8091
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
     }
+
+    /**
+     * Cache of discovered capabilities keyed by Atlas endpoint string.
+     * Cleared for a given endpoint whenever Atlas reports no provider for a contract
+     * (e.g. after a robot restart), so the next call re-probes automatically.
+     */
+    private val capabilityCache = ConcurrentHashMap<String, RobotCapabilitySet>()
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(5, TimeUnit.SECONDS)
@@ -128,6 +129,132 @@ class PerceptionRepository @Inject constructor(
     // Keyed by "$atlasEndpoint::$contractId"
     private val sessionCache = ConcurrentHashMap<String, McpSession>()
 
+    /**
+     * Finds LiDAR capability using semantic wildcard matching.
+     * Prioritizes snapshot tools first, then scan tools.
+     */
+    private fun findLidarContract(contracts: Set<String>): String? {
+        contracts.firstOrNull { id ->
+            val lower = id.lowercase()
+            (lower.contains("lidar") || lower.contains("laser")) &&
+                (lower.endsWith("snapshot") || lower.contains("snapshot"))
+        }?.let { return it }
+
+        contracts.firstOrNull { id ->
+            val lower = id.lowercase()
+            (lower.contains("lidar") || lower.contains("laser")) &&
+                (lower.endsWith("scan") || lower.contains("scan"))
+        }?.let { return it }
+
+        return contracts.firstOrNull { id ->
+            val lower = id.lowercase()
+            lower.contains("lidar") || lower.contains("laser")
+        }
+    }
+
+    /**
+     * Finds RGB camera capability using semantic wildcard matching.
+     * Strictly prioritizes snapshot tools over raw topic/stream names like "rgb" or "image".
+     */
+    private fun findCameraRgbContract(contracts: Set<String>): String? {
+        // Priority 1: explicitly a snapshot contract (e.g. robonix/primitive/camera/snapshot)
+        contracts.firstOrNull { id ->
+            val lower = id.lowercase()
+            lower.contains("camera") && !lower.contains("depth") &&
+                (lower.endsWith("snapshot") || lower.contains("snapshot"))
+        }?.let { return it }
+
+        // Priority 2: explicitly an image contract
+        contracts.firstOrNull { id ->
+            val lower = id.lowercase()
+            lower.contains("camera") && !lower.contains("depth") &&
+                (lower.contains("image") || lower.contains("rgb"))
+        }?.let { return it }
+
+        // Priority 3: any remaining non-depth camera contract
+        return contracts.firstOrNull { id ->
+            val lower = id.lowercase()
+            lower.contains("camera") && !lower.contains("depth")
+        }
+    }
+
+    /**
+     * Finds depth camera capability using semantic wildcard matching.
+     * Strictly prioritizes snapshot tools over raw topic/stream names.
+     */
+    private fun findCameraDepthContract(contracts: Set<String>): String? {
+        // Priority 1: explicitly a depth snapshot contract
+        contracts.firstOrNull { id ->
+            val lower = id.lowercase()
+            (lower.contains("camera") || lower.contains("depth")) && lower.contains("depth") &&
+                (lower.endsWith("snapshot") || lower.contains("snapshot"))
+        }?.let { return it }
+
+        // Priority 2: image/raw depth
+        return contracts.firstOrNull { id ->
+            val lower = id.lowercase()
+            (lower.contains("camera") || lower.contains("depth")) && lower.contains("depth") &&
+                (lower.contains("image") || lower.contains("raw"))
+        }
+    }
+
+    private fun findSceneContract(allContracts: Set<String>, keyword: String): String? {
+        return allContracts.firstOrNull { id ->
+            val lower = id.lowercase()
+            lower.contains("scene") && lower.contains(keyword)
+        }
+    }
+
+    /**
+     * Discovers robot capabilities dynamically using fast semantic wildcard matching.
+     * Strictly separates MCP tool capabilities (for one-shot sensor RPCs) from general contracts.
+     */
+    private suspend fun discoverCapabilities(atlasEndpoint: String): RobotCapabilitySet {
+        capabilityCache[atlasEndpoint]?.let { return it }
+
+        return try {
+            val providers = atlasClient.queryProviders(atlasEndpoint)
+            
+            // Contracts registered specifically under TRANSPORT_MCP (for sensor snapshots)
+            val mcpContracts = providers
+                .flatMap { it.capabilities }
+                .filter { it.transport == "TRANSPORT_MCP" || it.transport.endsWith("MCP") }
+                .map { it.contractId }
+                .toSet()
+
+            // All contracts across all transports (e.g. for scene, vitals, etc.)
+            val allContracts = providers
+                .flatMap { it.capabilities }
+                .map { it.contractId }
+                .toSet()
+
+            // For MCP sensor calls, search MCP-capable contracts first, falling back to allContracts if empty
+            val sensorContracts = if (mcpContracts.isNotEmpty()) mcpContracts else allContracts
+
+            RobotCapabilitySet(
+                cameraRgb     = findCameraRgbContract(sensorContracts),
+                cameraDepth   = findCameraDepthContract(sensorContracts),
+                lidarSnapshot = findLidarContract(sensorContracts),
+                sceneRobot    = findSceneContract(allContracts, "robot"),
+                sceneObjects  = findSceneContract(allContracts, "object"),
+                sceneRegions  = findSceneContract(allContracts, "region"),
+            ).also {
+                capabilityCache[atlasEndpoint] = it
+                AppLog.write(
+                    "PERCEPTION",
+                    "[$atlasEndpoint] discovered caps: " +
+                        "cam=${it.cameraRgb?.substringAfterLast("/")} " +
+                        "depth=${it.cameraDepth?.substringAfterLast("/")} " +
+                        "lidar=${it.lidarSnapshot?.substringAfterLast("/")} " +
+                        "scene=${it.sceneRobot != null}",
+                )
+            }
+        } catch (e: Exception) {
+            AppLog.write("PERCEPTION", "[$atlasEndpoint] capability discovery failed: ${e.message}")
+            RobotCapabilitySet.EMPTY
+        }
+    }
+
     suspend fun fetchPerceptionSnapshot(robotHost: String, atlasPort: Int = 50051): PerceptionDataSnapshot =
         withContext(Dispatchers.IO) {
             val started = System.currentTimeMillis()
@@ -136,6 +263,9 @@ class PerceptionRepository @Inject constructor(
                 return@withContext PerceptionDataSnapshot()
             }
             val atlasEndpoint = "$host:$atlasPort"
+
+            // Discover (or retrieve from cache) what this robot body actually supports.
+            val caps = discoverCapabilities(atlasEndpoint)
 
             var cameraBitmap: Bitmap? = null
             var cameraInfo = ""
@@ -150,26 +280,27 @@ class PerceptionRepository @Inject constructor(
             var mapBitmap: Bitmap? = null
             var anySuccess = false
 
-            // Fetch sensors in parallel directly from the configured robot host
+            // Fetch sensors in parallel directly from the configured robot host.
+            // Each deferred is skipped when the corresponding capability is absent.
             coroutineScope {
                 // 1. Camera RGB
                 val cameraDeferred = async {
-                    fetchCameraRgb(atlasEndpoint, host)
+                    fetchCameraRgb(atlasEndpoint, host, caps)
                 }
 
                 // 2. Depth Camera
                 val depthDeferred = async {
-                    fetchCameraDepth(atlasEndpoint, host)
+                    fetchCameraDepth(atlasEndpoint, host, caps)
                 }
 
                 // 3. LiDAR Scan
                 val lidarDeferred = async {
-                    fetchLidar(atlasEndpoint, host)
+                    fetchLidar(atlasEndpoint, host, caps)
                 }
 
                 // 4. Scene Context
                 val sceneDeferred = async {
-                    fetchScene(atlasEndpoint, host)
+                    fetchScene(atlasEndpoint, host, caps)
                 }
 
                 // 5. Occupancy Map
@@ -177,43 +308,7 @@ class PerceptionRepository @Inject constructor(
                     fetchOccupancyMap(host)
                 }
 
-                // Await Camera
-                try {
-                    val res = cameraDeferred.await()
-                    if (res != null) {
-                        cameraBitmap = res.first
-                        cameraInfo = res.second
-                        anySuccess = true
-                    }
-                } catch (e: Exception) {
-                    AppLog.write("PERCEPTION", "Camera fetch failed: ${e.message}")
-                }
-
-                // Await Depth
-                try {
-                    val res = depthDeferred.await()
-                    if (res != null) {
-                        depthBitmap = res.first
-                        depthInfo = res.second
-                        anySuccess = true
-                    }
-                } catch (e: Exception) {
-                    AppLog.write("PERCEPTION", "Depth fetch failed: ${e.message}")
-                }
-
-                // Await LiDAR
-                try {
-                    val res = lidarDeferred.await()
-                    if (res != null) {
-                        lidarPoints = res.first
-                        lidarInfo = res.second
-                        anySuccess = true
-                    }
-                } catch (e: Exception) {
-                    AppLog.write("PERCEPTION", "LiDAR fetch failed: ${e.message}")
-                }
-
-                // Await Scene
+                // 1. Await Scene first so robotPose is available for lidar coordinate transformations
                 try {
                     val res = sceneDeferred.await()
                     if (res != null) {
@@ -228,7 +323,78 @@ class PerceptionRepository @Inject constructor(
                     AppLog.write("PERCEPTION", "Scene fetch failed: ${e.message}")
                 }
 
-                // Await Map
+                // 2. Await Camera
+                try {
+                    val res = cameraDeferred.await()
+                    if (res != null) {
+                        cameraBitmap = res.first
+                        cameraInfo = res.second
+                        anySuccess = true
+                    }
+                } catch (e: Exception) {
+                    AppLog.write("PERCEPTION", "Camera fetch failed: ${e.message}")
+                }
+
+                // 3. Await Depth
+                try {
+                    val res = depthDeferred.await()
+                    if (res != null) {
+                        depthBitmap = res.first
+                        depthInfo = res.second
+                        anySuccess = true
+                    }
+                } catch (e: Exception) {
+                    AppLog.write("PERCEPTION", "Depth fetch failed: ${e.message}")
+                }
+
+                // 4. Camera Fallback: if either RGB or Depth wasn't fetched via MCP,
+                // fall back to scene HTTP service (http://$host:50107/api/camera)
+                if (cameraBitmap == null || depthBitmap == null) {
+                    try {
+                        val fallback = fetchCameraFallback(host)
+                        if (cameraBitmap == null && fallback.first != null) {
+                            cameraBitmap = fallback.first!!.first
+                            cameraInfo = fallback.first!!.second
+                            anySuccess = true
+                        }
+                        if (depthBitmap == null && fallback.second != null) {
+                            depthBitmap = fallback.second!!.first
+                            depthInfo = fallback.second!!.second
+                            anySuccess = true
+                        }
+                    } catch (e: Exception) {
+                        AppLog.write("PERCEPTION", "Camera HTTP fallback failed: ${e.message}")
+                    }
+                }
+
+                // 5. Await LiDAR
+                try {
+                    val res = lidarDeferred.await()
+                    if (res != null) {
+                        lidarPoints = res.first
+                        lidarInfo = res.second
+                        anySuccess = true
+                    }
+                } catch (e: Exception) {
+                    AppLog.write("PERCEPTION", "LiDAR fetch failed: ${e.message}")
+                }
+
+                // 6. LiDAR Fallback: if MCP lidar snapshot is missing or failed (e.g. on Lite3 / MID-360),
+                // fall back to mapping service range endpoint (http://$host:8091/api/range)
+                if (lidarPoints.isEmpty()) {
+                    try {
+                        val fallback = fetchLidarFallback(host, robotPose)
+                        if (fallback != null) {
+                            lidarPoints = fallback.first
+                            lidarInfo = fallback.second
+                            anySuccess = true
+                        }
+                    } catch (e: Exception) {
+                        AppLog.write("PERCEPTION", "LiDAR 8091 fallback failed: ${e.message}")
+                    }
+                }
+
+                // 7. Await Map
                 try {
                     val res = mapDeferred.await()
                     if (res != null) {
@@ -270,13 +436,23 @@ class PerceptionRepository @Inject constructor(
     // Direct Sensor Fetching (Strictly using configured robot IP)
     // ─────────────────────────────────────────────────────────────────────────────
 
-    private suspend fun fetchCameraRgb(atlasEndpoint: String, host: String): Pair<Bitmap, String>? {
+    /**
+     * Fetches a one-shot RGB camera image using whichever contract the robot advertises.
+     * Returns null silently when the robot has no camera capability.
+     */
+    private suspend fun fetchCameraRgb(
+        atlasEndpoint: String,
+        host: String,
+        caps: RobotCapabilitySet,
+    ): Pair<Bitmap, String>? {
+        val contract = caps.cameraRgb ?: return null
+        val tool = contract.substringAfterLast("/") // e.g. "snapshot"
         try {
             val args = JSONObject().apply {
                 put("camera_name", "head_camera")
                 put("format", "jpeg")
             }
-            val res = mcpCall(atlasEndpoint, CONTRACT_CAMERA_RGB, "snapshot", args)
+            val res = mcpCall(atlasEndpoint, contract, tool, args)
             val b64 = extractImageBase64(res)
             if (b64.isNotBlank()) {
                 val bytes = Base64.decode(b64, Base64.DEFAULT)
@@ -288,19 +464,30 @@ class PerceptionRepository @Inject constructor(
                 }
             }
         } catch (e: Exception) {
-            AppLog.write("PERCEPTION", "Direct MCP Camera error: ${e.message}")
+            if (isNoProviderError(e)) capabilityCache.remove(atlasEndpoint)
+            AppLog.write("PERCEPTION", "Camera [$contract] error: ${e.message}")
         }
         return null
     }
 
-    private suspend fun fetchCameraDepth(atlasEndpoint: String, host: String): Pair<Bitmap, String>? {
+    /**
+     * Fetches a one-shot depth image using whichever contract the robot advertises.
+     * Returns null silently when the robot has no depth camera capability.
+     */
+    private suspend fun fetchCameraDepth(
+        atlasEndpoint: String,
+        host: String,
+        caps: RobotCapabilitySet,
+    ): Pair<Bitmap, String>? {
+        val contract = caps.cameraDepth ?: return null
+        val tool = contract.substringAfterLast("/") // e.g. "depth_snapshot"
         try {
             val args = JSONObject().apply {
                 put("camera_name", "head_camera")
                 put("format", "png")
                 put("colormap", "turbo")
             }
-            val res = mcpCall(atlasEndpoint, CONTRACT_CAMERA_DEPTH, "depth_snapshot", args)
+            val res = mcpCall(atlasEndpoint, contract, tool, args)
             val b64 = extractImageBase64(res)
             if (b64.isNotBlank()) {
                 val bytes = Base64.decode(b64, Base64.DEFAULT)
@@ -312,17 +499,36 @@ class PerceptionRepository @Inject constructor(
                 }
             }
         } catch (e: Exception) {
-            AppLog.write("PERCEPTION", "Direct MCP Depth error: ${e.message}")
+            if (isNoProviderError(e)) capabilityCache.remove(atlasEndpoint)
+            AppLog.write("PERCEPTION", "Depth [$contract] error: ${e.message}")
         }
         return null
     }
 
-    private suspend fun fetchLidar(atlasEndpoint: String, host: String): Pair<List<LidarScanPoint>, String>? {
+    /**
+     * Fetches a one-shot lidar scan using whichever contract the robot advertises.
+     *
+     * Handles both contract variants transparently:
+     * - `lidar/snapshot`       → 2D LaserScan (Webots / Hokuyo)    tool="snapshot"
+     * - `lidar/lidar_snapshot` → 3D→2D scan (MID-360 / Lite3)      tool="lidar_snapshot"
+     *
+     * Returns null silently when the robot has no lidar capability.
+     */
+    private suspend fun fetchLidar(
+        atlasEndpoint: String,
+        host: String,
+        caps: RobotCapabilitySet,
+    ): Pair<List<LidarScanPoint>, String>? {
+        val contract = caps.lidarSnapshot ?: return null
+        // Tool name is always the last path segment of the contract.
+        // "lidar/snapshot" → tool="snapshot"
+        // "lidar/lidar_snapshot" → tool="lidar_snapshot"
+        val tool = contract.substringAfterLast("/")
         try {
             val args = JSONObject().apply {
                 put("lidar_name", "main_lidar")
             }
-            val res = mcpCall(atlasEndpoint, CONTRACT_LIDAR, "snapshot", args)
+            val res = mcpCall(atlasEndpoint, contract, tool, args)
             val scan = if (res.has("scan")) res.getJSONObject("scan") else res
             val pts = parseLidarScan(scan)
             if (pts.isNotEmpty()) {
@@ -336,7 +542,8 @@ class PerceptionRepository @Inject constructor(
                 return Pair(pts, info)
             }
         } catch (e: Exception) {
-            AppLog.write("PERCEPTION", "Direct MCP LiDAR error: ${e.message}")
+            if (isNoProviderError(e)) capabilityCache.remove(atlasEndpoint)
+            AppLog.write("PERCEPTION", "LiDAR [$contract] error: ${e.message}")
         }
         return null
     }
@@ -347,7 +554,15 @@ class PerceptionRepository @Inject constructor(
         val regions: List<SceneRegion>,
     )
 
-    private suspend fun fetchScene(atlasEndpoint: String, host: String): SceneResult {
+    /**
+     * Fetches scene context (robot pose, objects, regions) using contracts the robot advertises.
+     * Falls back gracefully when individual contracts are absent.
+     */
+    private suspend fun fetchScene(
+        atlasEndpoint: String,
+        host: String,
+        caps: RobotCapabilitySet,
+    ): SceneResult {
         var robotPose: RobotPose? = null
         val objects = mutableListOf<SceneObject>()
         val regions = mutableListOf<SceneRegion>()
@@ -405,9 +620,10 @@ class PerceptionRepository @Inject constructor(
         }
 
         // 2. Fallback to direct MCP scene contracts if pose or objects missing
-        if (robotPose == null) {
+        if (robotPose == null && caps.sceneRobot != null) {
             try {
-                val res = mcpCall(atlasEndpoint, CONTRACT_SCENE_ROBOT, "get_robot_context")
+                val contract = caps.sceneRobot
+                val res = mcpCall(atlasEndpoint, contract, contract.substringAfterLast("/"))
                 val rob = res.optJSONObject("robot") ?: res
                 if (rob.has("x") || rob.has("pose")) {
                     val pose = rob.optJSONObject("pose") ?: rob
@@ -418,12 +634,15 @@ class PerceptionRepository @Inject constructor(
                         roomName = rob.optString("room_name", ""),
                     )
                 }
-            } catch (_: Exception) {}
+            } catch (e: Exception) {
+                if (isNoProviderError(e)) capabilityCache.remove(atlasEndpoint)
+            }
         }
 
-        if (objects.isEmpty()) {
+        if (objects.isEmpty() && caps.sceneObjects != null) {
             try {
-                val res = mcpCall(atlasEndpoint, CONTRACT_SCENE_OBJECTS, "list_objects")
+                val contract = caps.sceneObjects
+                val res = mcpCall(atlasEndpoint, contract, contract.substringAfterLast("/"))
                 val arr = res.optJSONArray("objects")
                 if (arr != null) {
                     for (i in 0 until arr.length()) {
@@ -441,7 +660,9 @@ class PerceptionRepository @Inject constructor(
                         )
                     }
                 }
-            } catch (_: Exception) {}
+            } catch (e: Exception) {
+                if (isNoProviderError(e)) capabilityCache.remove(atlasEndpoint)
+            }
         }
 
         return SceneResult(robotPose, objects, regions)
@@ -504,9 +725,128 @@ class PerceptionRepository @Inject constructor(
         return null
     }
 
+    /**
+     * Fallback for robots where MCP camera snapshots are not configured or failed:
+     * fetches RGB and depth frames directly from the scene HTTP service (port 50107 /api/camera).
+     */
+    private fun fetchCameraFallback(host: String): Pair<Pair<Bitmap, String>?, Pair<Bitmap, String>?> {
+        try {
+            val url = "http://$host:$MAP_UI_PORT/api/camera"
+            val req = Request.Builder().url(url).build()
+            httpClient.newCall(req).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    val json = JSONObject(resp.body?.string() ?: "")
+                    var rgbPair: Pair<Bitmap, String>? = null
+                    var depthPair: Pair<Bitmap, String>? = null
+
+                    val rgbObj = json.optJSONObject("rgb")
+                    if (rgbObj != null) {
+                        val b64 = rgbObj.optString("png_b64")
+                        if (b64.isNotBlank()) {
+                            val bytes = Base64.decode(b64, Base64.DEFAULT)
+                            val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                            if (bmp != null) {
+                                val w = rgbObj.optInt("width", bmp.width)
+                                val h = rgbObj.optInt("height", bmp.height)
+                                rgbPair = Pair(bmp, "${w}×${h}")
+                            }
+                        }
+                    }
+
+                    val depthObj = json.optJSONObject("depth")
+                    if (depthObj != null) {
+                        val b64 = depthObj.optString("png_b64")
+                        if (b64.isNotBlank()) {
+                            val bytes = Base64.decode(b64, Base64.DEFAULT)
+                            val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                            if (bmp != null) {
+                                val w = depthObj.optInt("width", bmp.width)
+                                val h = depthObj.optInt("height", bmp.height)
+                                depthPair = Pair(bmp, "${w}×${h}")
+                            }
+                        }
+                    }
+
+                    return Pair(rgbPair, depthPair)
+                }
+            }
+        } catch (e: Exception) {
+            AppLog.write("PERCEPTION", "Scene /api/camera fallback error: ${e.message}")
+        }
+        return Pair(null, null)
+    }
+
+    /**
+     * Fallback for robots where MCP lidar snapshots are not configured or failed (e.g. Lite3 / MID-360):
+     * fetches range scan/cloud directly from the mapping HTTP service (port 8091 /api/range).
+     * If points are in map frame, transforms them to local robot coordinates using robotPose.
+     */
+    private fun fetchLidarFallback(host: String, robotPose: RobotPose?): Pair<List<LidarScanPoint>, String>? {
+        try {
+            val url = "http://$host:$MAPPING_PORT/api/range"
+            val req = Request.Builder().url(url).build()
+            httpClient.newCall(req).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    val json = JSONObject(resp.body?.string() ?: "")
+                    val scanObj = json.optJSONObject("scan") ?: json.optJSONObject("cloud")
+                    val pts = scanObj?.optJSONArray("pts")
+                        ?: json.optJSONArray("pts")
+                        ?: json.optJSONArray("points")
+                    if (pts != null && pts.length() > 0) {
+                        val rx = robotPose?.x?.toDouble() ?: 0.0
+                        val ry = robotPose?.y?.toDouble() ?: 0.0
+                        val yaw = robotPose?.headingRad?.toDouble() ?: 0.0
+                        val cosY = Math.cos(-yaw)
+                        val sinY = Math.sin(-yaw)
+
+                        val list = ArrayList<LidarScanPoint>(pts.length())
+                        for (i in 0 until pts.length()) {
+                            val item = pts.optJSONArray(i) ?: continue
+                            if (item.length() < 2) continue
+                            val mx = item.optDouble(0)
+                            val my = item.optDouble(1)
+                            if (mx.isNaN() || my.isNaN()) continue
+
+                            // If points are in map frame and we have robot pose, transform to robot frame.
+                            // If robot pose is zero or missing, rx/ry/yaw are 0 so dx=mx, dy=my.
+                            val dx = mx - rx
+                            val dy = my - ry
+                            val lx = dx * cosY - dy * sinY
+                            val ly = dx * sinY + dy * cosY
+
+                            val r = Math.hypot(lx, ly).toFloat()
+                            if (r in 0.05f..30.0f && !r.isInfinite()) {
+                                val angleRad = Math.atan2(ly, lx)
+                                val angleDeg = Math.toDegrees(angleRad).toFloat()
+                                list.add(LidarScanPoint(angleDeg, r, 1.0f))
+                            }
+                        }
+
+                        if (list.isNotEmpty()) {
+                            return Pair(list, "${list.size} pts")
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            AppLog.write("PERCEPTION", "Mapping 8091 /api/range fallback error: ${e.message}")
+        }
+        return null
+    }
+
     // ─────────────────────────────────────────────────────────────────────────────
     // MCP Transport & Handshake (Strictly using configured robot host)
     // ─────────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Returns true when an exception indicates that Atlas has no provider for the
+     * requested contract — typically after a robot restart or primitive crash.
+     * In that case the capability cache for this endpoint should be invalidated so
+     * the next poll cycle re-discovers which contracts are actually available.
+     */
+    private fun isNoProviderError(e: Exception): Boolean =
+        e.message?.contains("no provider", ignoreCase = true) == true ||
+            e.message?.contains("no MCP provider", ignoreCase = true) == true
 
     private suspend fun mcpCall(
         atlasEndpoint: String,
@@ -527,7 +867,7 @@ class PerceptionRepository @Inject constructor(
         return try {
             callMcpTool(session, tool, arguments)
         } catch (e: Exception) {
-            // Invalidate session cache on error so next call re-handshakes
+            // Invalidate MCP session on error so next call re-handshakes.
             sessionCache.remove(cacheKey)
             throw e
         }
@@ -716,21 +1056,69 @@ class PerceptionRepository @Inject constructor(
     }
 
     private fun parseLidarScan(scan: JSONObject): List<LidarScanPoint> {
-        val ranges = scan.optJSONArray("ranges") ?: return emptyList()
-        val angleMin = scan.optDouble("angle_min", -Math.PI)
-        val angleInc = scan.optDouble("angle_increment", 0.017)
-        val rangeMin = scan.optDouble("range_min", 0.05).toFloat()
-        val rangeMax = scan.optDouble("range_max", 12.0).toFloat()
+        // Mode 1: 2D LaserScan (ranges array)
+        val ranges = scan.optJSONArray("ranges")
+        if (ranges != null && ranges.length() > 0) {
+            val angleMin = scan.optDouble("angle_min", -Math.PI)
+            val angleInc = scan.optDouble("angle_increment", 0.017)
+            val rangeMin = scan.optDouble("range_min", 0.05).toFloat()
+            val rangeMax = scan.optDouble("range_max", 12.0).toFloat()
 
-        val list = ArrayList<LidarScanPoint>(ranges.length())
-        for (i in 0 until ranges.length()) {
-            val r = ranges.optDouble(i, 0.0).toFloat()
-            if (r in rangeMin..rangeMax && !r.isNaN() && !r.isInfinite()) {
-                val angleRad = angleMin + i * angleInc
-                val angleDeg = Math.toDegrees(angleRad).toFloat()
-                list.add(LidarScanPoint(angleDeg, r, 1.0f))
+            val list = ArrayList<LidarScanPoint>(ranges.length())
+            for (i in 0 until ranges.length()) {
+                val r = ranges.optDouble(i, 0.0).toFloat()
+                if (r in rangeMin..rangeMax && !r.isNaN() && !r.isInfinite()) {
+                    val angleRad = angleMin + i * angleInc
+                    val angleDeg = Math.toDegrees(angleRad).toFloat()
+                    list.add(LidarScanPoint(angleDeg, r, 1.0f))
+                }
             }
+            if (list.isNotEmpty()) return list
         }
-        return list
+
+        // Mode 2: Cartesian Points array (e.g. 3D/2D point clouds, points: [[x,y], ...] or [{x,y}, ...])
+        val points = scan.optJSONArray("points") ?: scan.optJSONArray("cloud")
+        if (points != null && points.length() > 0) {
+            val list = ArrayList<LidarScanPoint>(points.length())
+            for (i in 0 until points.length()) {
+                var x = 0.0f
+                var y = 0.0f
+                var z = 0.0f
+                var hasZ = false
+
+                val item = points.opt(i)
+                if (item is JSONArray) {
+                    if (item.length() >= 2) {
+                        x = item.optDouble(0, 0.0).toFloat()
+                        y = item.optDouble(1, 0.0).toFloat()
+                        if (item.length() >= 3) {
+                            z = item.optDouble(2, 0.0).toFloat()
+                            hasZ = true
+                        }
+                    }
+                } else if (item is JSONObject) {
+                    x = item.optDouble("x", 0.0).toFloat()
+                    y = item.optDouble("y", 0.0).toFloat()
+                    if (item.has("z")) {
+                        z = item.optDouble("z", 0.0).toFloat()
+                        hasZ = true
+                    }
+                }
+
+                val r = Math.hypot(x.toDouble(), y.toDouble()).toFloat()
+                if (r in 0.05f..30.0f && !r.isNaN() && !r.isInfinite()) {
+                    // Filter floor / ceiling if 3D height is present
+                    if (hasZ && (z < -0.6f || z > 2.0f)) {
+                        continue
+                    }
+                    val angleRad = Math.atan2(y.toDouble(), x.toDouble())
+                    val angleDeg = Math.toDegrees(angleRad).toFloat()
+                    list.add(LidarScanPoint(angleDeg, r, 1.0f))
+                }
+            }
+            if (list.isNotEmpty()) return list
+        }
+
+        return emptyList()
     }
 }

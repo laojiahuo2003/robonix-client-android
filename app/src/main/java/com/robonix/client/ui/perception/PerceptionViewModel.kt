@@ -38,7 +38,7 @@ data class SceneLayers(
 
 data class PerceptionUiState(
     val isConnected: Boolean = false,
-    val selectedChannel: Int = 0, // 0: Matrix (2x2), 1: Camera, 2: Depth, 3: LiDAR, 4: Map/Scene
+    val selectedChannel: Int = 0, // 0: All (Matrix), 1: Camera, 2: Depth, 3: Map/Scene
     val layoutMode: String = "matrix", // "matrix", "split"
     val fps: Int = 30,
     val latencyMs: Int = 16,
@@ -193,12 +193,27 @@ class PerceptionViewModel @Inject constructor(
 
     fun onDepthTouch(offset: Offset, canvasWidth: Float, canvasHeight: Float) {
         if (canvasWidth <= 0 || canvasHeight <= 0) return
-        val normY = (offset.y / canvasHeight).coerceIn(0f, 1f)
-        val distance = 0.5f + (1.0f - normY) * 4.5f + (sin(offset.x.toDouble() * 0.05) * 0.1f).toFloat()
+        val currentBitmap = _uiState.value.depthBitmap
+        val distance = if (currentBitmap != null && !currentBitmap.isRecycled) {
+            val bmpX = ((offset.x / canvasWidth) * currentBitmap.width).toInt().coerceIn(0, currentBitmap.width - 1)
+            val bmpY = ((offset.y / canvasHeight) * currentBitmap.height).toInt().coerceIn(0, currentBitmap.height - 1)
+            val pixel = currentBitmap.getPixel(bmpX, bmpY)
+            val r = (pixel shr 16) and 0xFF
+            val g = (pixel shr 8) and 0xFF
+            val b = pixel and 0xFF
+            // Grayscale / brightness: nearer = brighter (255 ~ 0.3m, 0 ~ 5.0m)
+            val brightness = (r * 0.299f + g * 0.587f + b * 0.114f) / 255f
+            val d = 0.3f + (1.0f - brightness) * 4.7f
+            (d * 100).toInt() / 100f
+        } else {
+            val normY = (offset.y / canvasHeight).coerceIn(0f, 1f)
+            val d = 0.5f + (1.0f - normY) * 4.5f
+            (d * 100).toInt() / 100f
+        }
         _uiState.update {
             it.copy(
                 depthProbeOffset = offset,
-                depthProbeDistance = (distance * 100).toInt() / 100f,
+                depthProbeDistance = distance,
             )
         }
     }

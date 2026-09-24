@@ -113,11 +113,7 @@ fun PerceptionScreen(
                     onToggleHeatmap = { viewModel.toggleHeatmap() },
                     onBack = { viewModel.selectChannel(0) },
                 )
-                3 -> LidarView(
-                    state = state,
-                    onBack = { viewModel.selectChannel(0) },
-                )
-                4 -> SceneMapView(
+                3 -> SceneMapView(
                     state = state,
                     onToggleLayer = { viewModel.toggleLayer(it) },
                     onBack = { viewModel.selectChannel(0) },
@@ -225,7 +221,6 @@ private fun PerceptionTopBar(
             t("perception.tab.all"),
             t("perception.tab.camera"),
             t("perception.tab.depth"),
-            t("perception.tab.lidar"),
             t("perception.tab.map"),
         )
         Surface(
@@ -272,8 +267,9 @@ private fun PerceptionTopBar(
 }
 
 /**
- * 2x2 Clean Matrix Grid:
- * Displays all 4 sensor feeds in uncluttered cards.
+ * Clean Perception Matrix Grid:
+ * Row 1: Camera and Depth feeds side-by-side.
+ * Row 2: 2D Scene Map spanning full width.
  * Tapping any tile smoothly opens its full view.
  */
 @Composable
@@ -298,18 +294,12 @@ private fun MatrixGrid(
                 DepthTile(state = state, isExpanded = false, onTouch = { _, _, _ -> }, onSelect = { onSelectTile(2) })
             }
         }
-        Row(
+        Box(
             modifier = Modifier
-                .weight(1f)
+                .weight(1.2f)
                 .fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Box(Modifier.weight(1f).fillMaxHeight()) {
-                LidarTile(state = state, isExpanded = false, onSelect = { onSelectTile(3) })
-            }
-            Box(Modifier.weight(1f).fillMaxHeight()) {
-                SceneMapTile(state = state, isExpanded = false, onSelect = { onSelectTile(4) })
-            }
+            SceneMapTile(state = state, isExpanded = false, onSelect = { onSelectTile(3) })
         }
     }
 }
@@ -486,27 +476,38 @@ private fun DepthTile(
                 },
         ) {
             if (state.depthBitmap != null) {
-                Image(
-                    bitmap = state.depthBitmap.asImageBitmap(),
-                    contentDescription = "Depth Map",
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize(),
-                )
-            } else {
-                // Standby depth gradient
-                Canvas(modifier = Modifier.fillMaxSize()) {
-                    canvasSize = size
-                    drawRect(
-                        brush = Brush.verticalGradient(
-                            colors = listOf(
-                                Color(0xFF1E1B4B),
-                                Color(0xFF1D4ED8),
-                                Color(0xFF0D9488),
-                                Color(0xFFEAB308),
-                                Color(0xFFDC2626),
-                            ),
-                        ),
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Image(
+                        bitmap = state.depthBitmap.asImageBitmap(),
+                        contentDescription = "Depth Map",
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxSize(),
+                        alignment = Alignment.Center,
                     )
+                }
+            } else {
+                // Clean standby placeholder
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Panel2),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(Icons.Default.Sensors, null, tint = Dim, modifier = Modifier.size(28.dp))
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            t("perception.stream.standby"),
+                            color = Muted,
+                            fontSize = 10.5.sp,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
                 }
             }
 
@@ -532,8 +533,15 @@ private fun DepthTile(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                val depthLabel = if (state.depthInfo.isNotBlank()) {
+                    "DEPTH · ${state.depthInfo}"
+                } else if (state.depthHeatmapEnabled) {
+                    "DEPTH · TURBO"
+                } else {
+                    "DEPTH · RAW"
+                }
                 SensorBadge(
-                    name = if (state.depthHeatmapEnabled) "DEPTH · TURBO" else "DEPTH · RAW",
+                    name = depthLabel,
                     isOnline = state.depthBitmap != null,
                 )
 
@@ -636,191 +644,6 @@ private fun DepthView(
                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
                     )
                 }
-            }
-        }
-    }
-}
-
-/** 2D LiDAR PPI Radar Tile */
-@Composable
-private fun LidarTile(
-    state: PerceptionUiState,
-    isExpanded: Boolean,
-    onSelect: () -> Unit,
-    onBack: (() -> Unit)? = null,
-) {
-    CyberCard(
-        showBrackets = false,
-        cornerRadius = 10.dp,
-        borderColor = LineSoft,
-        modifier = Modifier
-            .fillMaxSize()
-            .clickable(enabled = !isExpanded) { onSelect() },
-    ) {
-        Box(modifier = Modifier.fillMaxSize()) {
-            Canvas(modifier = Modifier.fillMaxSize()) {
-                val cx = size.width / 2f
-                val cy = size.height / 2f
-                val radius = minOf(cx, cy) * 0.88f
-
-                // Radar background
-                drawCircle(
-                    brush = Brush.radialGradient(
-                        colors = listOf(Color(0xFF071B16), Color(0xFF030A08)),
-                        center = Offset(cx, cy),
-                        radius = radius,
-                    ),
-                    radius = radius,
-                    center = Offset(cx, cy),
-                )
-
-                // Concentric range circles (2m, 4m, 6m, 8m, 10m)
-                val rings = listOf(0.2f, 0.4f, 0.6f, 0.8f, 1.0f)
-                rings.forEach { frac ->
-                    drawCircle(
-                        color = RadarGrid,
-                        radius = radius * frac,
-                        center = Offset(cx, cy),
-                        style = Stroke(width = 0.8f),
-                    )
-                }
-
-                // Crosshair axes
-                drawLine(RadarGrid, Offset(cx - radius, cy), Offset(cx + radius, cy), 0.8f)
-                drawLine(RadarGrid, Offset(cx, cy - radius), Offset(cx, cy + radius), 0.8f)
-
-                // Rotating radar sweep line
-                val sweepRad = Math.toRadians(state.lidarSweepAngle.toDouble())
-                val sweepEndX = cx + (radius * cos(sweepRad)).toFloat()
-                val sweepEndY = cy + (radius * sin(sweepRad)).toFloat()
-                drawLine(
-                    color = RadarGreen.copy(alpha = 0.7f),
-                    start = Offset(cx, cy),
-                    end = Offset(sweepEndX, sweepEndY),
-                    strokeWidth = 1.5f,
-                    cap = StrokeCap.Round,
-                )
-
-                // Render scan points (REP-103 standard: angle 0 points forward/up)
-                val maxRange = 10f
-                state.lidarPoints.forEach { pt ->
-                    val r = pt.distanceMeters.coerceIn(0f, maxRange)
-                    val ptRad = Math.toRadians(pt.angleDeg.toDouble())
-                    val frac = (r / maxRange).coerceIn(0f, 1f)
-
-                    val px = cx - (radius * frac * sin(ptRad)).toFloat()
-                    val py = cy - (radius * frac * cos(ptRad)).toFloat()
-
-                    val color = when {
-                        r < 0.6f -> Color(0xFFF2726F)
-                        r < 1.2f -> Color(0xFFFFD166)
-                        else -> Color(0xFF35E0A0)
-                    }
-
-                    drawCircle(
-                        color = color,
-                        radius = if (isExpanded) 2.5.dp.toPx() else 1.8.dp.toPx(),
-                        center = Offset(px, py),
-                    )
-                }
-
-                // Center Robot heading indicator (pointing UP / Forward)
-                val arrowLen = if (isExpanded) 14.dp.toPx() else 9.dp.toPx()
-                val path = Path().apply {
-                    moveTo(cx, cy - arrowLen)
-                    lineTo(cx + arrowLen * 0.6f, cy + arrowLen * 0.7f)
-                    lineTo(cx, cy + arrowLen * 0.35f)
-                    lineTo(cx - arrowLen * 0.6f, cy + arrowLen * 0.7f)
-                    close()
-                }
-                drawPath(path, color = Color(0xFFFFD166))
-            }
-
-            // Top Header: Badge on left, Expand/Back on right
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .align(Alignment.TopStart),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                SensorBadge(
-                    name = "LiDAR · 10M",
-                    isOnline = state.lidarPoints.isNotEmpty(),
-                )
-
-                if (isExpanded && onBack != null) {
-                    IconButton(
-                        onClick = onBack,
-                        modifier = Modifier
-                            .padding(6.dp)
-                            .size(24.dp)
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(Panel.copy(alpha = 0.85f)),
-                    ) {
-                        Icon(Icons.Default.FullscreenExit, "Collapse", tint = Cyan, modifier = Modifier.size(15.dp))
-                    }
-                } else if (!isExpanded) {
-                    Icon(
-                        Icons.Default.Fullscreen,
-                        "Expand",
-                        tint = Dim,
-                        modifier = Modifier
-                            .padding(8.dp)
-                            .size(16.dp),
-                    )
-                }
-            }
-        }
-    }
-}
-
-/** Full LiDAR View with Decoupled Stats Strip */
-@Composable
-private fun LidarView(
-    state: PerceptionUiState,
-    onBack: () -> Unit,
-) {
-    Column(modifier = Modifier.fillMaxSize()) {
-        Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-            LidarTile(
-                state = state,
-                isExpanded = true,
-                onSelect = {},
-                onBack = onBack,
-            )
-        }
-
-        Spacer(Modifier.height(8.dp))
-
-        // External Bottom Info Bar
-        Surface(
-            color = Panel,
-            shape = RoundedCornerShape(8.dp),
-            border = androidx.compose.foundation.BorderStroke(0.8.dp, LineSoft),
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    "${state.lidarPoints.size} 扫描点云 · 10米量程",
-                    color = Muted,
-                    fontSize = 11.5.sp,
-                )
-
-                val headingDeg = ((state.robotPose?.headingRad ?: 0f) * 180f / Math.PI.toFloat()).roundToInt()
-                Text(
-                    "朝向: ${headingDeg}°",
-                    color = Amber,
-                    fontSize = 11.5.sp,
-                    fontFamily = FontFamily.Monospace,
-                    fontWeight = FontWeight.SemiBold,
-                )
             }
         }
     }

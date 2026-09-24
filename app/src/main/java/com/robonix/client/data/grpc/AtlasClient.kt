@@ -40,13 +40,17 @@ class AtlasClient @Inject constructor(
             .setResponseMarshaller(ProtoUtils.marshaller(ConnectCapabilityResponse.getDefaultInstance()))
             .build()
 
-    suspend fun queryProviders(target: String, contractId: String = ""): List<ProviderInfo> =
+    suspend fun queryProviders(
+        target: String,
+        contractId: String = "",
+        transport: Transport = Transport.TRANSPORT_UNSPECIFIED,
+    ): List<ProviderInfo> =
         withContext(Dispatchers.IO) {
             val channel = channelProvider.getChannel(target)
 
             val request = QueryRequest.newBuilder().apply {
                 if (contractId.isNotBlank()) this.contractId = contractId
-                transport = Transport.TRANSPORT_GRPC
+                if (transport != Transport.TRANSPORT_UNSPECIFIED) this.transport = transport
             }.build()
 
             val response = ClientCalls.blockingUnaryCall(
